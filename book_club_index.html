@@ -1,0 +1,577 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>My Book Club</title>
+    <meta name="description" content="Book Club – add books, batch commit, and browse your library." />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <style>
+      html, body, #root { height: 100%; }
+      body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; background:#0B1220; }
+      * { box-sizing: border-box; }
+      a { color: inherit; }
+    </style>
+    <!-- React 18 + Babel for in-browser JSX compilation -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+      const { useEffect, useState } = React;
+
+      /* ------------------------------- Theme ------------------------------- */
+      const theme = {
+        bg: "#0B1220",
+        surface: "#111827",
+        surface2: "#0F172A",
+        text: "#E5E7EB",
+        textMuted: "#94A3B8",
+        border: "#1F2937",
+        accent: "#8B5CF6",
+        accentHover: "#7C3AED",
+        accentText: "#FFFFFF",
+        danger: "#F43F5E",
+        ring: "#22D3EE",
+        shadow: "0 10px 25px rgba(0,0,0,0.45)",
+      };
+
+      // App/club name (edit as you like)
+      const CLUB_NAME = "My Book Club";
+
+      /* ------------------------ Google Books helpers ------------------------ */
+      const GOOGLE_BOOKS_BASE = "https://www.googleapis.com/books/v1/volumes";
+
+      async function googleFetch(params, { signal } = {}) {
+        const url = `${GOOGLE_BOOKS_BASE}?${new URLSearchParams(params).toString()}`;
+        const res = await fetch(url, { signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      }
+
+      function extractIsbn(volumeInfo) {
+        const ids = volumeInfo?.industryIdentifiers || [];
+        const v13 = ids.find((x) => x.type === "ISBN_13");
+        const v10 = ids.find((x) => x.type === "ISBN_10");
+        return v13?.identifier || v10?.identifier || "";
+      }
+
+      function yearFromPublishedDate(publishedDate) {
+        if (!publishedDate) return "";
+        const m = String(publishedDate).match(/\d{4}/);
+        return m ? m[0] : "";
+      }
+
+      function normalizeIsbn(text) {
+        const raw = (text || "").replace(/[\-\s]/g, "").toUpperCase();
+        if (!raw) return "";
+        if (/^\d{13}$/.test(raw)) return raw; // ISBN-13
+        if (/^\d{9}[\dX]$/.test(raw)) return raw; // ISBN-10
+        return "";
+      }
+
+      /* ---------------------- Query interpretation ---------------------- */
+      function tokenize(s) {
+        return (s || "")
+          .toLowerCase()
+          .split(/[^a-z0-9]+/i)
+          .filter(Boolean);
+      }
+
+      function looksLikeName(q) {
+        const t = tokenize(q);
+        return t.length >= 2 && t.every((x) => !/\d/.test(x));
+      }
+
+      /* ------------------------- Query heuristics ------------------------- */
+      const STOPWORDS = new Set(["a", "an", "the", "of", "and"]);
+      function contentTokens(tokens) {
+        return (tokens || []).filter((t) => t.length > 2 && !STOPWORDS.has(t));
+      }
+      function looksLikeTitle(q) {
+        return !looksLikeName(q) && contentTokens(tokenize(q)).length > 0;
+      }
+      function normalizeLoose(s) {
+        return (s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+      }
+
+      /* ---------------------------- Fuzzy utils ---------------------------- */
+      function levenshtein(a = "", b = "") {
+        a = a.toLowerCase();
+        b = b.toLowerCase();
+        const m = a.length;
+        const n = b.length;
+        if (m === 0) return n;
+        if (n === 0) return m;
+        const dp = new Array(n + 1);
+        for (let j = 0; j <= n; j++) dp[j] = j;
+        for (let i = 1; i <= m; i++) {
+          let prev = dp[0];
+          dp[0] = i;
+          for (let j = 1; j <= n; j++) {
+            const temp = dp[j];
+            const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+            dp[j] = Math.min(dp[j] + 1, dp[j - 1] + 1, prev + cost);
+            prev = temp;
+          }
+        }
+        return dp[n];
+      }
+
+      function similarity(a, b) {
+        const maxLen = Math.max(a?.length || 0, b?.length || 0);
+        if (!maxLen) return 0;
+        const dist = levenshtein(a, b);
+        return 1 - dist / maxLen; // 0..1
+      }
+
+      function tokenThreshold(token) {
+        const L = token.length;
+        if (L <= 2) return 1.0; // too short: require exact
+        if (L === 3) return 0.85;
+        if (L <= 5) return 0.78;
+        return 0.72; // 6+
+      }
+
+      function fuzzyContains(text = "", token = "") {
+        const t = token.toLowerCase();
+        const hay = (text || "").toLowerCase();
+        if (!t) return false;
+        if (hay.includes(t)) return true;
+        const thresh = tokenThreshold(t);
+        const words = hay.split(/\s+/).filter(Boolean);
+        for (const w of words) {
+          if (similarity(w, t) >= thresh) return true;
+        }
+        if (similarity(hay, t) >= Math.max(thresh, 0.8)) return true; // whole-string fuzzy
+        return false;
+      }
+
+      function authorMatchesAllTokens(volumeInfo, queryTokens) {
+        const authors = (volumeInfo?.authors || []).map((a) => a.toLowerCase());
+        return authors.some((a) => queryTokens.every((t) => a.includes(t)));
+      }
+
+      function authorMatchesAllTokensFuzzy(volumeInfo, queryTokens) {
+        const authors = (volumeInfo?.authors || []).map((a) => a.toLowerCase());
+        if (authors.length === 0) return false;
+        return queryTokens.every((t) => authors.some((a) => fuzzyContains(a, t)));
+      }
+
+      function titleMatchesTokens(volumeInfo, queryTokens) {
+        const t = [volumeInfo?.title, volumeInfo?.subtitle].filter(Boolean).join(" ").toLowerCase();
+        const qTokens = contentTokens(queryTokens);
+        if (qTokens.length === 0) return false;
+        return qTokens.every((tk) => t.includes(tk));
+      }
+
+      function titleMatchesTokensFuzzy(volumeInfo, queryTokens) {
+        const t = [volumeInfo?.title, volumeInfo?.subtitle].filter(Boolean).join(" ").toLowerCase();
+        if (!t) return false;
+        const qTokens = contentTokens(queryTokens);
+        if (qTokens.length === 0) return false;
+        return qTokens.every((tk) => fuzzyContains(t, tk));
+      }
+
+      function scoreVolume(volumeInfo, q, { titleBias = false } = {}) {
+        const tokens = tokenize(q);
+        const fullTitle = [volumeInfo.title, volumeInfo.subtitle].filter(Boolean).join(" ").toLowerCase();
+        const authors = (volumeInfo.authors || []).map((a) => a.toLowerCase());
+        const authorStr = authors.join(" ");
+        const phrase = contentTokens(tokens).join(" ");
+        const lang = (volumeInfo.language || "").toLowerCase();
+
+        let score = 0;
+        if (lang === "en" || lang === "da") score += 4; else if (lang) score -= 0.5;
+        if (phrase && fullTitle.includes(phrase)) score += titleBias ? 5 : 3;
+        if (phrase && authors.some((a) => a.includes(phrase))) score += titleBias ? 1.5 : 4;
+        const ct = contentTokens(tokens);
+        if (ct.length && authors.some((a) => ct.every((t) => a.includes(t)))) score += titleBias ? 1.5 : 2.5;
+        ct.forEach((t) => { if (fullTitle.includes(t)) score += titleBias ? 1.5 : 1.25; });
+        if (fullTitle.startsWith(ct[0] || "")) score += titleBias ? 2.5 : 1.5;
+        if (normalizeLoose(fullTitle) === normalizeLoose(q)) score += titleBias ? 4 : 3;
+        const qLoose = normalizeLoose(q);
+        score += (titleBias ? 1.2 : 2) * similarity(authorStr, qLoose);
+        score += (titleBias ? 2.2 : 1.7) * similarity(fullTitle, qLoose);
+        const y = yearFromPublishedDate(volumeInfo.publishedDate || "");
+        if (y) {
+          const yr = parseInt(y, 10);
+          if (!Number.isNaN(yr)) score += Math.min(1.5, (yr - 1990) / 50);
+        }
+        return score;
+      }
+
+      async function unifiedSearch(query, { signal } = {}) {
+        const isbn = normalizeIsbn(query);
+        if (isbn) {
+          const json = await googleFetch({ q: `isbn:${isbn}`, maxResults: 1, fields: "items(volumeInfo)" }, { signal });
+          const v = json.items?.[0]?.volumeInfo;
+          return v ? [v] : [];
+        }
+
+        const q = query.trim();
+        const tokens = tokenize(q);
+        const titleLike = looksLikeTitle(q);
+        const fields =
+          "items(volumeInfo/title,volumeInfo/subtitle,volumeInfo/authors,volumeInfo/imageLinks/thumbnail,volumeInfo/description,volumeInfo/industryIdentifiers,volumeInfo/pageCount,volumeInfo/publishedDate,volumeInfo/publisher,volumeInfo/language)";
+
+        const queries = [];
+        const quoted = `"${q}"`;
+        if (titleLike) {
+          queries.push(
+            { q: `intitle:${q}`, maxResults: 10, fields, langRestrict: 'en' },
+            { q: `intitle:${q}`, maxResults: 10, fields, langRestrict: 'da' },
+            { q: quoted,       maxResults: 10, fields, langRestrict: 'en' },
+            { q: quoted,       maxResults: 10, fields, langRestrict: 'da' },
+            { q: `intitle:${q}`, maxResults: 10, fields },
+            { q: quoted,         maxResults: 10, fields },
+            { q: q,              maxResults: 10, fields }
+          );
+        } else {
+          queries.push(
+            { q: `inauthor:${q}`, maxResults: 10, fields, langRestrict: 'en' },
+            { q: `inauthor:${q}`, maxResults: 10, fields, langRestrict: 'da' },
+            { q: `intitle:${q}`,  maxResults: 10, fields, langRestrict: 'en' },
+            { q: `intitle:${q}`,  maxResults: 10, fields, langRestrict: 'da' },
+            { q: `inauthor:${q}`, maxResults: 10, fields },
+            { q: `intitle:${q}`,  maxResults: 10, fields },
+            { q: q,               maxResults: 10, fields }
+          );
+        }
+
+        const results = await Promise.allSettled(queries.map((p) => googleFetch(p, { signal })));
+        const vols = [];
+        for (const r of results) if (r.status === "fulfilled") (r.value.items || []).forEach((it) => vols.push(it.volumeInfo || {}));
+
+        const dedup = new Map();
+        for (const v of vols) {
+          const key = `${(v.title || "").toLowerCase()}::${(v.authors?.[0] || "").toLowerCase()}`;
+          if (!v.title || dedup.has(key)) continue;
+          dedup.set(key, v);
+        }
+        const all = Array.from(dedup.values());
+
+        let strict = titleLike
+          ? all.filter((v) => titleMatchesTokens(v, tokens))
+          : all.filter((v) => authorMatchesAllTokens(v, tokens) || titleMatchesTokens(v, tokens));
+
+        let fuzzy = [];
+        if (strict.length < 6) {
+          fuzzy = titleLike
+            ? all.filter((v) => titleMatchesTokensFuzzy(v, tokens))
+            : all.filter((v) => authorMatchesAllTokensFuzzy(v, tokens) || titleMatchesTokensFuzzy(v, tokens));
+        }
+
+        const merged = [];
+        const seen = new Set();
+        for (const v of [...strict, ...fuzzy]) {
+          const key = `${(v.title || "").toLowerCase()}::${(v.authors?.[0] || "").toLowerCase()}`;
+          if (!seen.has(key)) { seen.add(key); merged.push(v); }
+        }
+
+        merged.sort((a, b) => scoreVolume(b, q, { titleBias: titleLike }) - scoreVolume(a, q, { titleBias: titleLike }));
+        return merged.slice(0, 8);
+      }
+
+      /* Helpers for vendor links (title-only query) */
+      function vendorSearchQuery(book) {
+        return encodeURIComponent(book?.title || "").replace(/%20/g, "+");
+      }
+      function vendorSearchQueryKKB(book) {
+        return encodeURIComponent(encodeURIComponent(book?.title || ""));
+      }
+
+      /* ------------------------ Small components ------------------------ */
+      function BookCard({ book }) {
+        const query = vendorSearchQuery(book);
+        const links = {
+          dba: `https://www.dba.dk/soeg/?soeg=${query}`,
+          saxo: `https://www.saxo.com/dk/products/search?query=${query}`,
+          kkb: `https://bibliotek.kk.dk/search?q=${vendorSearchQueryKKB(book)}`,
+        };
+        const linkStyle = {
+          display: 'inline-block',
+          padding: '0.45rem 0.7rem',
+          borderRadius: 8,
+          border: `1px solid ${theme.border}`,
+          background: theme.surface2,
+          color: theme.text,
+          fontSize: 12,
+          textDecoration: 'none',
+        };
+
+        return (
+          <div style={{ border: `1px solid ${theme.border}`, borderRadius: 12, overflow: 'hidden', background: theme.surface, boxShadow: theme.shadow }}>
+            <div style={{ height: 160, background: theme.surface2 }}>
+              {book.cover ? (
+                <img src={book.cover} alt={book.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+              ) : (
+                <div style={{ display: 'grid', placeContent: 'center', height: '100%', color: theme.textMuted }}>No Cover</div>
+              )}
+            </div>
+            <div style={{ padding: 10 }}>
+              <div style={{ fontWeight: 700, color: theme.text }}>{book.title}</div>
+              <div style={{ color: theme.textMuted, fontSize: 13 }}>{book.author}</div>
+              <div style={{ color: theme.textMuted, fontSize: 12, marginTop: 4 }}>
+                <span>{book.year || '—'}</span>
+                {typeof book.pages === 'number' && <span> · {book.pages} pages</span>}
+                {book.publisher && <span> · {book.publisher}</span>}
+                {book.language && <span> · {book.language}</span>}
+              </div>
+              {book.description && (
+                <p style={{ color: theme.text, fontSize: 13, marginTop: 6, marginBottom: 0, whiteSpace: 'pre-line' }}>{book.description}</p>
+              )}
+              {/* Vendor links (Title only, per request) */}
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
+                <a href={links.dba} target="_blank" rel="noopener noreferrer" style={linkStyle}>Køb på DBA</a>
+                <a href={links.saxo} target="_blank" rel="noopener noreferrer" style={linkStyle}>Køb på Saxo</a>
+                <a href={links.kkb} target="_blank" rel="noopener noreferrer" style={linkStyle}>Lån på KKB</a>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      /* ------------------------------- App --------------------------------- */
+      function BookClubApp() {
+        const [books, setBooks] = useState([]); // no defaults
+        const [recentBatch, setRecentBatch] = useState([]);
+        const [activeTab, setActiveTab] = useState("add");
+        const [search, setSearch] = useState("");
+        const [sugg, setSugg] = useState([]);
+        const [searchBusy, setSearchBusy] = useState(false);
+        const [searchErr, setSearchErr] = useState("");
+        const [draft, setDraft] = useState({ isbn: "", title: "", author: "", cover: "", description: "", year: "", pages: undefined, publisher: "", language: "" });
+        const [staging, setStaging] = useState([]);
+
+        useEffect(() => { document.title = `${CLUB_NAME}`; }, []);
+
+        useEffect(() => {
+          if (activeTab !== "add") return;
+          const q = search.trim();
+          setSearchErr("");
+          if (q.length < 3) { setSugg([]); return; }
+          const ctl = new AbortController();
+          const t = setTimeout(async () => {
+            setSearchBusy(true);
+            try {
+              const results = await unifiedSearch(q, { signal: ctl.signal });
+              setSugg(results);
+            } catch (e) {
+              if (e?.name !== "AbortError") setSearchErr("Search failed. Try again.");
+            } finally {
+              setSearchBusy(false);
+            }
+          }, 250);
+          return () => { clearTimeout(t); ctl.abort(); };
+        }, [search, activeTab]);
+
+        function selectVolume(v) {
+          setDraft({
+            isbn: extractIsbn(v),
+            title: v.title || "",
+            author: (v.authors && v.authors.join(", ")) || "",
+            cover: v.imageLinks?.thumbnail?.replace("http://", "https://") || "",
+            description: v.description || "",
+            year: yearFromPublishedDate(v.publishedDate),
+            pages: v.pageCount,
+            publisher: v.publisher || "",
+            language: (v.language || "").toUpperCase(),
+          });
+          setSugg([]);
+          const label = [v.title, (v.authors && v.authors[0])].filter(Boolean).join(" — ");
+          setSearch(label);
+        }
+
+        function queueBook() {
+          if (!draft.title || !draft.author) return;
+          const key = `${draft.title}::${draft.author}`;
+          const exists = staging.some((b) => `${b.title}::${b.author}` === key);
+          if (!exists)
+            setStaging((q) => [
+              ...q,
+              { title: draft.title, author: draft.author, cover: draft.cover, description: draft.description, year: draft.year, pages: draft.pages, publisher: draft.publisher, language: draft.language, isbn: draft.isbn },
+            ]);
+          setDraft({ isbn: "", title: "", author: "", cover: "", description: "", year: "", pages: undefined, publisher: "", language: "" });
+          setSearch("");
+        }
+
+        function removeFromStaging(index) { setStaging((q) => q.filter((_, i) => i !== index)); }
+
+        function commitBatch() {
+          if (staging.length === 0) return;
+          setBooks((prev) => [...prev, ...staging]);
+          setRecentBatch(staging);
+          setStaging([]);
+          setActiveTab("recent");
+        }
+
+        return (
+          <div style={{ minHeight: "100vh", background: `radial-gradient(1200px 600px at 50% -10%, #111827 0%, ${theme.bg} 60%)`, color: theme.text }}>
+            <div style={{ padding: "1.25rem", maxWidth: 1100, margin: "0 auto" }}>
+              <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+                <h1 style={{ fontSize: "1.875rem", fontWeight: 800, margin: 0 }}>📚 {CLUB_NAME}</h1>
+                <div style={{ fontSize: 12, color: theme.textMuted }}>Dark mode</div>
+              </header>
+
+              {/* Tabs */}
+              <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+                {[{ id: "add", label: "Add Books" }, { id: "all", label: "All Books" }, { id: "recent", label: "Recent Batch" }].map((t) => (
+                  <button key={t.id} onClick={() => setActiveTab(t.id)} style={{ padding: "0.5rem 0.875rem", borderRadius: 999, border: `1px solid ${theme.border}`, cursor: "pointer", fontWeight: 700, background: activeTab === t.id ? theme.accent : theme.surface2, color: activeTab === t.id ? theme.accentText : theme.text }}>
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+
+              {activeTab === "add" && (
+                <div style={{ display: "grid", gap: 16 }}>
+                  <div style={{ position: "relative" }}>
+                    <input style={{ width: "100%", padding: "0.75rem 0.9rem", border: `1px solid ${theme.border}`, borderRadius: 10, fontSize: "1rem", color: theme.text, background: theme.surface2, outline: "none", boxShadow: "none" }} placeholder="Type author, title, or ISBN (e.g., 'Torrey Peters' or '9783161484100')" value={search} onChange={(e) => setSearch(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && sugg[0]) selectVolume(sugg[0]); }} />
+                    {(sugg.length > 0 || searchBusy || (search.trim().length >= 3 && !searchBusy)) && (
+                      <ul role="listbox" style={{ position: "absolute", top: "100%", left: 0, right: 0, background: theme.surface, border: `1px solid ${theme.border}`, borderTop: "none", maxHeight: 240, overflowY: "auto", zIndex: 10, boxShadow: theme.shadow }}>
+                        {sugg.map((v, i) => (
+                          <li role="option" tabIndex={0} key={`${v.title}-${(v.authors && v.authors[0]) || ""}-${i}`} style={{ padding: "0.6rem 0.75rem", cursor: "pointer", borderBottom: `1px solid ${theme.border}`, color: theme.text }} onMouseDown={() => selectVolume(v)} onKeyDown={(e) => { if (e.key === "Enter") selectVolume(v); }}>
+                            <strong style={{ color: theme.text }}>{v.title}</strong>
+                            {v.authors && <span style={{ fontSize: "0.875rem", color: theme.textMuted }}> — {v.authors.join(", ")}</span>}
+                          </li>
+                        ))}
+                        {searchBusy && <li style={{ padding: "0.6rem 0.75rem", color: theme.textMuted }}>Searching…</li>}
+                        {!searchBusy && search.trim().length >= 3 && sugg.length === 0 && (<li style={{ padding: "0.6rem 0.75rem", color: theme.textMuted }}>No results</li>)}
+                      </ul>
+                    )}
+                    {searchErr && <p style={{ color: theme.danger, fontSize: "0.875rem", marginTop: 4 }}>{searchErr}</p>}
+                  </div>
+
+                  {draft.title && (
+                    <div style={{ border: `1px solid ${theme.border}`, borderRadius: 14, overflow: "hidden", background: theme.surface, boxShadow: theme.shadow }}>
+                      <div style={{ height: 180, background: theme.surface2, position: "relative" }}>
+                        {draft.cover ? (<img src={draft.cover} alt={draft.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} />) : (<div style={{ display: "grid", placeContent: "center", height: "100%", color: theme.textMuted }}>No Cover</div>)}
+                        <div style={{ position: "absolute", bottom: 0, left: 0, width: "100%", padding: "0.5rem 0.75rem", background: "linear-gradient(to top, rgba(0,0,0,0.65), transparent)", color: theme.text }}>
+                          <h4 style={{ margin: 0 }}>{draft.title}</h4>
+                          <p style={{ margin: 0, fontSize: 14, color: theme.textMuted }}>{draft.author}</p>
+                        </div>
+                      </div>
+                      <div style={{ padding: "0.75rem" }}>
+                        <div style={{ color: theme.textMuted, fontSize: 14 }}>
+                          <span>{draft.year || "—"}</span>
+                          {typeof draft.pages === "number" && <span> · {draft.pages} pages</span>}
+                          {draft.publisher && <span> · {draft.publisher}</span>}
+                          {draft.language && <span> · {draft.language}</span>}
+                        </div>
+                        <p style={{ margin: "6px 0 0", color: theme.text, whiteSpace: "pre-line" }}>{draft.description || "No description provided."}</p>
+                        <button onClick={() => queueBook()} style={{ padding: "0.7rem 1rem", borderRadius: 10, border: "none", background: theme.accent, color: theme.accentText, cursor: "pointer", fontSize: "1rem", boxShadow: theme.shadow, width: "100%", marginTop: 12 }}>Queue Book</button>
+                      </div>
+                    </div>
+                  )}
+
+                  <div>
+                    <h4 style={{ margin: "0 0 8px 0", color: theme.text }}>Staging ({staging.length})</h4>
+                    {staging.length === 0 ? (
+                      <p style={{ margin: 0, color: theme.textMuted }}>No books queued yet.</p>
+                    ) : (
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 12 }}>
+                        {staging.map((b, i) => (
+                          <div key={`${b.title}-${i}`} style={{ border: `1px solid ${theme.border}`, borderRadius: 12, overflow: "hidden", background: theme.surface }}>
+                            <div style={{ height: 120, background: theme.surface2 }}>
+                              {b.cover ? (<img src={b.cover} alt={b.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} />) : (<div style={{ display: "grid", placeContent: "center", height: "100%", color: theme.textMuted }}>No Cover</div>)}
+                            </div>
+                            <div style={{ padding: 8 }}>
+                              <div style={{ fontWeight: 700, color: theme.text }}>{b.title}</div>
+                              <div style={{ color: theme.textMuted, fontSize: 13 }}>{b.author}</div>
+                              <div style={{ color: theme.textMuted, fontSize: 12, marginTop: 4 }}>
+                                <span>{b.year || "—"}</span>
+                                {typeof b.pages === "number" && <span> · {b.pages} pages</span>}
+                                {b.publisher && <span> · {b.publisher}</span>}
+                                {b.language && <span> · {b.language}</span>}
+                              </div>
+                              <button onClick={() => removeFromStaging(i)} style={{ padding: "0.35rem 0.6rem", borderRadius: 8, border: `1px solid ${theme.border}`, background: theme.surface2, color: theme.text, cursor: "pointer", fontSize: 12, marginTop: 8 }}>Remove</button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <button onClick={() => commitBatch()} disabled={staging.length === 0} style={{ padding: "0.7rem 1rem", borderRadius: 10, border: "none", background: theme.accent, color: theme.accentText, cursor: "pointer", fontSize: "1rem", boxShadow: theme.shadow, width: "100%", opacity: staging.length === 0 ? 0.6 : 1 }}>Add {staging.length || "0"} to Library</button>
+                </div>
+              )}
+
+              {activeTab === "all" && (
+                <div>
+                  <div style={{ marginBottom: 12, color: theme.textMuted }}>{books.length} book{books.length !== 1 ? "s" : ""} total</div>
+                  {books.length === 0 ? (
+                    <p style={{ color: theme.textMuted }}>No books yet. Add some from the Add Books tab.</p>
+                  ) : (
+                    <div style={{ overflowX: "auto", border: `1px solid ${theme.border}`, borderRadius: 12, boxShadow: theme.shadow }}>
+                      <table style={{ width: "100%", borderCollapse: "collapse", color: theme.text }}>
+                        <thead>
+                          <tr style={{ background: theme.surface2, textAlign: "left" }}>
+                            <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Book</th>
+                            <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Year</th>
+                            <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Pages</th>
+                            <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Publisher</th>
+                            <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Lang</th>
+                            <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Links</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {books.map((b, i) => (
+                            <tr key={`${b.title}-${i}`} style={{ borderTop: `1px solid ${theme.border}`, background: i % 2 ? theme.surface : theme.surface2 }}>
+                              <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>
+                                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                                  <div style={{ width: 40, height: 60, background: theme.surface2, borderRadius: 6, overflow: "hidden", flex: "0 0 auto", border: `1px solid ${theme.border}` }}>
+                                    {b.cover ? (<img src={b.cover} alt={b.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} />) : null}
+                                  </div>
+                                  <div>
+                                    <div style={{ fontWeight: 700 }}>{b.title}</div>
+                                    <div style={{ color: theme.textMuted, fontSize: 13 }}>{b.author}</div>
+                                  </div>
+                                </div>
+                              </td>
+                              <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>{b.year || "—"}</td>
+                              <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>{typeof b.pages === "number" ? b.pages : "—"}</td>
+                              <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>{b.publisher || "—"}</td>
+                              <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>{b.language || "—"}</td>
+                              <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>
+                                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                  <a href={`https://www.dba.dk/soeg/?soeg=${vendorSearchQuery(b)}`} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-block', padding: '0.35rem 0.55rem', borderRadius: 8, border: `1px solid ${theme.border}`, background: theme.surface2, color: theme.text, textDecoration: 'none', fontSize: 12 }}>DBA</a>
+                                  <a href={`https://www.saxo.com/dk/products/search?query=${vendorSearchQuery(b)}`} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-block', padding: '0.35rem 0.55rem', borderRadius: 8, border: `1px solid ${theme.border}`, background: theme.surface2, color: theme.text, textDecoration: 'none', fontSize: 12 }}>Saxo</a>
+                                  <a href={`https://bibliotek.kk.dk/search?q=${vendorSearchQueryKKB(b)}`} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-block', padding: '0.35rem 0.55rem', borderRadius: 8, border: `1px solid ${theme.border}`, background: theme.surface2, color: theme.text, textDecoration: 'none', fontSize: 12 }}>KKB</a>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {activeTab === "recent" && (
+                <div>
+                  <div style={{ marginBottom: 12, color: theme.textMuted }}>{recentBatch.length} book{recentBatch.length !== 1 ? "s" : ""} in the last batch</div>
+                  {recentBatch.length === 0 ? (
+                    <p style={{ color: theme.textMuted }}>No recent batch. Queue books in the Add tab and commit them.</p>
+                  ) : (
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12 }}>
+                      {recentBatch.map((b, i) => (<BookCard key={`${b.title}-${i}`} book={b} />))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      }
+
+      const root = ReactDOM.createRoot(document.getElementById('root'));
+      root.render(<BookClubApp />);
+    </script>
+  </body>
+</html>
