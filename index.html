@@ -1,6 +1,5 @@
 <!doctype html>
 <html lang="en">
-
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -19,6 +18,14 @@
     <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Optional: Supabase client for cloud persistence -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script>
+      window.SUPABASE_URL = "https://rwldrwuudtpoxbxktgqv.supabase.co";
+      // IMPORTANT: Use your project's *anon public key* here (not your password or service key).
+      // You can either paste it on the next line OR click "Set anon key" in the header when the app loads.
+      window.SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ3bGRyd3V1ZHRwb3hieGt0Z3F2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTUwMTI2MTIsImV4cCI6MjA3MDU4ODYxMn0.bP7eAhHy6gu-Eg18XbqIupLxT2wcyWey9MU6RPz-ucI";
+    </script>
   </head>
   <body>
     <div id="root"></div>
@@ -279,6 +286,78 @@
         return merged.slice(0, 8);
       }
 
+      /* ---------------------------- Persistence ---------------------------- */
+      const LS_KEY = 'bookclub.books.v1';
+      const supaUrl = window.SUPABASE_URL || '';
+      const supaKey = window.SUPABASE_ANON_KEY || localStorage.getItem('SUPA_ANON') || '';
+      const hasSupabase = !!(supaUrl && supaKey && window.supabase);
+      const supa = hasSupabase ? window.supabase.createClient(supaUrl, supaKey) : null;
+
+      function dedupeBooks(arr) {
+        const map = new Map();
+        (arr || []).forEach((b) => {
+          const key = `${(b.title||'').toLowerCase()}::${(b.author||'').toLowerCase()}`;
+          if (!map.has(key)) map.set(key, b);
+        });
+        return Array.from(map.values());
+      }
+
+      function bookToRow(b) {
+        return {
+          title: b.title || null,
+          author: b.author || null,
+          cover: b.cover || null,
+          description: b.description || null,
+          year: b.year || null,
+          pages: typeof b.pages === 'number' ? b.pages : null,
+          publisher: b.publisher || null,
+          language: b.language || null,
+          isbn: b.isbn || null,
+        };
+      }
+      function rowToBook(r) {
+        return {
+          title: r.title || '',
+          author: r.author || '',
+          cover: r.cover || '',
+          description: r.description || '',
+          year: r.year || '',
+          pages: (typeof r.pages === 'number' ? r.pages : undefined),
+          publisher: r.publisher || '',
+          language: r.language || '',
+          isbn: r.isbn || '',
+        };
+      }
+
+      async function storageListBooks() {
+        if (supa) {
+          const { data, error } = await supa
+            .from('books')
+            .select('title, author, cover, description, year, pages, publisher, language, isbn, created_at')
+            .order('created_at', { ascending: true });
+          if (error) throw error;
+          return (data || []).map(rowToBook);
+        } else {
+          const raw = localStorage.getItem(LS_KEY);
+          return raw ? JSON.parse(raw) : [];
+        }
+      }
+
+      async function storageInsertBooks(batch) {
+        if (!batch || batch.length === 0) return [];
+        if (supa) {
+          const rows = batch.map(bookToRow);
+          const { data, error } = await supa.from('books').insert(rows).select('title, author, cover, description, year, pages, publisher, language, isbn, created_at');
+          if (error) throw error;
+          return (data || []).map(rowToBook);
+        } else {
+          const current = await storageListBooks();
+          const merged = dedupeBooks([...current, ...batch]);
+          localStorage.setItem(LS_KEY, JSON.stringify(merged));
+          return batch;
+        }
+      }
+
       /* Helpers for vendor links (title-only query) */
       function vendorSearchQuery(book) {
         return encodeURIComponent(book?.title || "").replace(/%20/g, "+");
@@ -340,7 +419,7 @@
 
       /* ------------------------------- App --------------------------------- */
       function BookClubApp() {
-        const [books, setBooks] = useState([]); // no defaults
+        const [books, setBooks] = useState([]); // persisted storage
         const [recentBatch, setRecentBatch] = useState([]);
         const [activeTab, setActiveTab] = useState("add");
         const [search, setSearch] = useState("");
@@ -349,9 +428,28 @@
         const [searchErr, setSearchErr] = useState("");
         const [draft, setDraft] = useState({ isbn: "", title: "", author: "", cover: "", description: "", year: "", pages: undefined, publisher: "", language: "" });
         const [staging, setStaging] = useState([]);
+        const [loadBusy, setLoadBusy] = useState(true);
+        const [loadErr, setLoadErr] = useState("");
 
         useEffect(() => { document.title = `${CLUB_NAME}`; }, []);
 
+        // Initial load from storage (Supabase or local)
+        useEffect(() => {
+          (async () => {
+            try {
+              setLoadBusy(true);
+              const list = await storageListBooks();
+              setBooks(list);
+            } catch (e) {
+              console.error(e);
+              setLoadErr("Failed to load library");
+            } finally {
+              setLoadBusy(false);
+            }
+          })();
+        }, []);
+
+        // Debounced, abortable search (Add tab)
         useEffect(() => {
           if (activeTab !== "add") return;
           const q = search.trim();
@@ -404,20 +502,44 @@
 
         function removeFromStaging(index) { setStaging((q) => q.filter((_, i) => i !== index)); }
 
-        function commitBatch() {
+        async function commitBatch() {
           if (staging.length === 0) return;
-          setBooks((prev) => [...prev, ...staging]);
-          setRecentBatch(staging);
-          setStaging([]);
-          setActiveTab("recent");
+          try {
+            const inserted = await storageInsertBooks(staging);
+            // Merge into UI state
+            setBooks((prev) => dedupeBooks([...prev, ...inserted]));
+            setRecentBatch(staging);
+            setStaging([]);
+            setActiveTab("recent");
+          } catch (e) {
+            console.error(e);
+            alert("Failed to save books. Please try again.");
+          }
         }
+
+        const storageBadge = hasSupabase ? "Cloud (Supabase)" : "Local (this browser)";
 
         return (
           <div style={{ minHeight: "100vh", background: `radial-gradient(1200px 600px at 50% -10%, #111827 0%, ${theme.bg} 60%)`, color: theme.text }}>
             <div style={{ padding: "1.25rem", maxWidth: 1100, margin: "0 auto" }}>
               <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
                 <h1 style={{ fontSize: "1.875rem", fontWeight: 800, margin: 0 }}>📚 {CLUB_NAME}</h1>
-                <div style={{ fontSize: 12, color: theme.textMuted }}>Dark mode</div>
+                <div style={{ fontSize: 12, color: theme.textMuted, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span>Storage: {storageBadge}</span>
+                {(!hasSupabase && supaUrl) && (
+                  <button onClick={() => {
+                    const k = prompt('Paste your Supabase anon public key');
+                    if (k) { localStorage.setItem('SUPA_ANON', k); location.reload(); }
+                  }} style={{ padding: '0.35rem 0.6rem', borderRadius: 8, border: `1px solid ${theme.border}`, background: theme.surface2, color: theme.text, cursor: 'pointer', fontSize: 12 }}>
+                    Set anon key
+                  </button>
+                )}
+                {hasSupabase && (
+                  <button onClick={() => { if (confirm('Remove locally stored anon key?')) { localStorage.removeItem('SUPA_ANON'); location.reload(); } }} style={{ padding: '0.35rem 0.6rem', borderRadius: 8, border: `1px solid ${theme.border}`, background: theme.surface2, color: theme.text, cursor: 'pointer', fontSize: 12 }}>
+                    Sign out
+                  </button>
+                )}
+              </div>
               </header>
 
               {/* Tabs */}
@@ -504,52 +626,60 @@
 
               {activeTab === "all" && (
                 <div>
-                  <div style={{ marginBottom: 12, color: theme.textMuted }}>{books.length} book{books.length !== 1 ? "s" : ""} total</div>
-                  {books.length === 0 ? (
-                    <p style={{ color: theme.textMuted }}>No books yet. Add some from the Add Books tab.</p>
+                  {loadBusy ? (
+                    <p style={{ color: theme.textMuted }}>Loading library…</p>
+                  ) : loadErr ? (
+                    <p style={{ color: theme.danger }}>{loadErr}</p>
                   ) : (
-                    <div style={{ overflowX: "auto", border: `1px solid ${theme.border}`, borderRadius: 12, boxShadow: theme.shadow }}>
-                      <table style={{ width: "100%", borderCollapse: "collapse", color: theme.text }}>
-                        <thead>
-                          <tr style={{ background: theme.surface2, textAlign: "left" }}>
-                            <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Book</th>
-                            <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Year</th>
-                            <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Pages</th>
-                            <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Publisher</th>
-                            <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Lang</th>
-                            <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Links</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {books.map((b, i) => (
-                            <tr key={`${b.title}-${i}`} style={{ borderTop: `1px solid ${theme.border}`, background: i % 2 ? theme.surface : theme.surface2 }}>
-                              <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>
-                                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                                  <div style={{ width: 40, height: 60, background: theme.surface2, borderRadius: 6, overflow: "hidden", flex: "0 0 auto", border: `1px solid ${theme.border}` }}>
-                                    {b.cover ? (<img src={b.cover} alt={b.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} />) : null}
-                                  </div>
-                                  <div>
-                                    <div style={{ fontWeight: 700 }}>{b.title}</div>
-                                    <div style={{ color: theme.textMuted, fontSize: 13 }}>{b.author}</div>
-                                  </div>
-                                </div>
-                              </td>
-                              <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>{b.year || "—"}</td>
-                              <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>{typeof b.pages === "number" ? b.pages : "—"}</td>
-                              <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>{b.publisher || "—"}</td>
-                              <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>{b.language || "—"}</td>
-                              <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>
-                                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                                  <a href={`https://www.dba.dk/soeg/?soeg=${vendorSearchQuery(b)}`} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-block', padding: '0.35rem 0.55rem', borderRadius: 8, border: `1px solid ${theme.border}`, background: theme.surface2, color: theme.text, textDecoration: 'none', fontSize: 12 }}>DBA</a>
-                                  <a href={`https://www.saxo.com/dk/products/search?query=${vendorSearchQuery(b)}`} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-block', padding: '0.35rem 0.55rem', borderRadius: 8, border: `1px solid ${theme.border}`, background: theme.surface2, color: theme.text, textDecoration: 'none', fontSize: 12 }}>Saxo</a>
-                                  <a href={`https://bibliotek.kk.dk/search?q=${vendorSearchQueryKKB(b)}`} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-block', padding: '0.35rem 0.55rem', borderRadius: 8, border: `1px solid ${theme.border}`, background: theme.surface2, color: theme.text, textDecoration: 'none', fontSize: 12 }}>KKB</a>
-                                </div>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
+                    <>
+                      <div style={{ marginBottom: 12, color: theme.textMuted }}>{books.length} book{books.length !== 1 ? "s" : ""} total</div>
+                      {books.length === 0 ? (
+                        <p style={{ color: theme.textMuted }}>No books yet. Add some from the Add Books tab.</p>
+                      ) : (
+                        <div style={{ overflowX: "auto", border: `1px solid ${theme.border}`, borderRadius: 12, boxShadow: theme.shadow }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse", color: theme.text }}>
+                            <thead>
+                              <tr style={{ background: theme.surface2, textAlign: "left" }}>
+                                <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Book</th>
+                                <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Year</th>
+                                <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Pages</th>
+                                <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Publisher</th>
+                                <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Lang</th>
+                                <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Links</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {books.map((b, i) => (
+                                <tr key={`${b.title}-${i}`} style={{ borderTop: `1px solid ${theme.border}`, background: i % 2 ? theme.surface : theme.surface2 }}>
+                                  <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>
+                                    <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                                      <div style={{ width: 40, height: 60, background: theme.surface2, borderRadius: 6, overflow: "hidden", flex: "0 0 auto", border: `1px solid ${theme.border}` }}>
+                                        {b.cover ? (<img src={b.cover} alt={b.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} />) : null}
+                                      </div>
+                                      <div>
+                                        <div style={{ fontWeight: 700 }}>{b.title}</div>
+                                        <div style={{ color: theme.textMuted, fontSize: 13 }}>{b.author}</div>
+                                      </div>
+                                    </div>
+                                  </td>
+                                  <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>{b.year || "—"}</td>
+                                  <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>{typeof b.pages === "number" ? b.pages : "—"}</td>
+                                  <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>{b.publisher || "—"}</td>
+                                  <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>{b.language || "—"}</td>
+                                  <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>
+                                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                      <a href={`https://www.dba.dk/soeg/?soeg=${vendorSearchQuery(b)}`} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-block', padding: '0.35rem 0.55rem', borderRadius: 8, border: `1px solid ${theme.border}`, background: theme.surface2, color: theme.text, textDecoration: 'none', fontSize: 12 }}>DBA</a>
+                                      <a href={`https://www.saxo.com/dk/products/search?query=${vendorSearchQuery(b)}`} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-block', padding: '0.35rem 0.55rem', borderRadius: 8, border: `1px solid ${theme.border}`, background: theme.surface2, color: theme.text, textDecoration: 'none', fontSize: 12 }}>Saxo</a>
+                                      <a href={`https://bibliotek.kk.dk/search?q=${vendorSearchQueryKKB(b)}`} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-block', padding: '0.35rem 0.55rem', borderRadius: 8, border: `1px solid ${theme.border}`, background: theme.surface2, color: theme.text, textDecoration: 'none', fontSize: 12 }}>KKB</a>
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
               )}
