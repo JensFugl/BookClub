@@ -23,7 +23,7 @@
     <script>
       // Supabase project URL (not sensitive — safe to keep here)
       window.SUPABASE_URL = "https://ypgbrezfmptvvbedwxcp.supabase.co";
-      // Anon key is NOT stored here. Click "Set anon key" in the header to configure cloud sync.
+      window.SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlwZ2JyZXpmbXB0dnZiZWR3eGNwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ3NTgzNzIsImV4cCI6MjA5MDMzNDM3Mn0.prvMDNSsNlOgGwwr-tLkhWXKIrkX3gk8yZkVFUN8D1g";
     </script>
   </head>
   <body>
@@ -277,7 +277,7 @@
       const LS_KEY = 'bookclub.books.v1';
       const STATUS_KEY = 'bookclub.status.v1';
       const supaUrl = window.SUPABASE_URL || '';
-      const supaKey = localStorage.getItem('SUPA_ANON') || '';
+      const supaKey = window.SUPABASE_ANON_KEY || localStorage.getItem('SUPA_ANON') || '';
       const hasSupabase = !!(supaUrl && supaKey && window.supabase);
       let supa = null;
       if (hasSupabase) {
