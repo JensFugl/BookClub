@@ -10,7 +10,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
     <style>
       html, body, #root { height: 100%; }
-      body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; background:#0B1220; }
+      body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
       * { box-sizing: border-box; }
       a { color: inherit; }
     </style>
@@ -21,20 +21,29 @@
     <!-- Optional: Supabase client for cloud persistence -->
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script>
+      // Supabase project URL (not sensitive — safe to keep here)
       window.SUPABASE_URL = "https://rwldrwuudtpoxbxktgqv.supabase.co";
-      // IMPORTANT: Use your project's *anon public key* here (not your password or service key).
-      // You can either paste it on the next line OR click "Set anon key" in the header when the app loads.
-      window.SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ3bGRyd3V1ZHRwb3hieGt0Z3F2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTUwMTI2MTIsImV4cCI6MjA3MDU4ODYxMn0.bP7eAhHy6gu-Eg18XbqIupLxT2wcyWey9MU6RPz-ucI";
+      // Anon key is NOT stored here. Click "Set anon key" in the header to configure cloud sync.
     </script>
   </head>
   <body>
     <div id="root"></div>
 
     <script type="text/babel">
-      const { useEffect, useState } = React;
+      const { createContext, useContext, useEffect, useRef, useState } = React;
 
-      /* ------------------------------- Theme ------------------------------- */
-      const theme = {
+      /* ------------------------------- Constants ------------------------------- */
+      const CARD_COVER_HEIGHT = 160;
+      const STAGING_COVER_HEIGHT = 120;
+      const DRAFT_COVER_HEIGHT = 180;
+      const SEARCH_DEBOUNCE_MS = 250;
+      const SEARCH_MAX_RESULTS = 8;
+      const GOOGLE_MAX_RESULTS = 10;
+
+      const READ_STATUSES = ["", "Want to Read", "Reading", "Read"];
+
+      /* ------------------------------- Themes ------------------------------- */
+      const darkTheme = {
         bg: "#0B1220",
         surface: "#111827",
         surface2: "#0F172A",
@@ -42,12 +51,29 @@
         textMuted: "#94A3B8",
         border: "#1F2937",
         accent: "#8B5CF6",
-        accentHover: "#7C3AED",
         accentText: "#FFFFFF",
         danger: "#F43F5E",
-        ring: "#22D3EE",
         shadow: "0 10px 25px rgba(0,0,0,0.45)",
+        bodyBg: "#0B1220",
+        inputBg: "#0F172A",
       };
+      const lightTheme = {
+        bg: "#F8FAFC",
+        surface: "#FFFFFF",
+        surface2: "#F1F5F9",
+        text: "#1E293B",
+        textMuted: "#64748B",
+        border: "#E2E8F0",
+        accent: "#7C3AED",
+        accentText: "#FFFFFF",
+        danger: "#E11D48",
+        shadow: "0 4px 16px rgba(0,0,0,0.10)",
+        bodyBg: "#F8FAFC",
+        inputBg: "#FFFFFF",
+      };
+
+      const ThemeCtx = createContext(darkTheme);
+      const useTheme = () => useContext(ThemeCtx);
 
       // App/club name (edit as you like)
       const CLUB_NAME = "My Book Club";
@@ -78,25 +104,19 @@
       function normalizeIsbn(text) {
         const raw = (text || "").replace(/[\-\s]/g, "").toUpperCase();
         if (!raw) return "";
-        if (/^\d{13}$/.test(raw)) return raw; // ISBN-13
-        if (/^\d{9}[\dX]$/.test(raw)) return raw; // ISBN-10
+        if (/^\d{13}$/.test(raw)) return raw;
+        if (/^\d{9}[\dX]$/.test(raw)) return raw;
         return "";
       }
 
       /* ---------------------- Query interpretation ---------------------- */
       function tokenize(s) {
-        return (s || "")
-          .toLowerCase()
-          .split(/[^a-z0-9]+/i)
-          .filter(Boolean);
+        return (s || "").toLowerCase().split(/[^a-z0-9]+/i).filter(Boolean);
       }
-
       function looksLikeName(q) {
         const t = tokenize(q);
         return t.length >= 2 && t.every((x) => !/\d/.test(x));
       }
-
-      /* ------------------------- Query heuristics ------------------------- */
       const STOPWORDS = new Set(["a", "an", "the", "of", "and"]);
       function contentTokens(tokens) {
         return (tokens || []).filter((t) => t.length > 2 && !STOPWORDS.has(t));
@@ -110,90 +130,71 @@
 
       /* ---------------------------- Fuzzy utils ---------------------------- */
       function levenshtein(a = "", b = "") {
-        a = a.toLowerCase();
-        b = b.toLowerCase();
-        const m = a.length;
-        const n = b.length;
+        a = a.toLowerCase(); b = b.toLowerCase();
+        const m = a.length, n = b.length;
         if (m === 0) return n;
         if (n === 0) return m;
         const dp = new Array(n + 1);
         for (let j = 0; j <= n; j++) dp[j] = j;
         for (let i = 1; i <= m; i++) {
-          let prev = dp[0];
-          dp[0] = i;
+          let prev = dp[0]; dp[0] = i;
           for (let j = 1; j <= n; j++) {
             const temp = dp[j];
-            const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-            dp[j] = Math.min(dp[j] + 1, dp[j - 1] + 1, prev + cost);
+            dp[j] = Math.min(dp[j] + 1, dp[j - 1] + 1, prev + (a[i-1] === b[j-1] ? 0 : 1));
             prev = temp;
           }
         }
         return dp[n];
       }
-
       function similarity(a, b) {
         const maxLen = Math.max(a?.length || 0, b?.length || 0);
         if (!maxLen) return 0;
-        const dist = levenshtein(a, b);
-        return 1 - dist / maxLen; // 0..1
+        return 1 - levenshtein(a, b) / maxLen;
       }
-
       function tokenThreshold(token) {
         const L = token.length;
-        if (L <= 2) return 1.0; // too short: require exact
+        if (L <= 2) return 1.0;
         if (L === 3) return 0.85;
         if (L <= 5) return 0.78;
-        return 0.72; // 6+
+        return 0.72;
       }
-
       function fuzzyContains(text = "", token = "") {
-        const t = token.toLowerCase();
-        const hay = (text || "").toLowerCase();
+        const t = token.toLowerCase(), hay = (text || "").toLowerCase();
         if (!t) return false;
         if (hay.includes(t)) return true;
         const thresh = tokenThreshold(t);
-        const words = hay.split(/\s+/).filter(Boolean);
-        for (const w of words) {
+        for (const w of hay.split(/\s+/).filter(Boolean)) {
           if (similarity(w, t) >= thresh) return true;
         }
-        if (similarity(hay, t) >= Math.max(thresh, 0.8)) return true; // whole-string fuzzy
-        return false;
+        return similarity(hay, t) >= Math.max(thresh, 0.8);
       }
-
-      function authorMatchesAllTokens(volumeInfo, queryTokens) {
-        const authors = (volumeInfo?.authors || []).map((a) => a.toLowerCase());
-        return authors.some((a) => queryTokens.every((t) => a.includes(t)));
+      function authorMatchesAllTokens(vi, qt) {
+        const authors = (vi?.authors || []).map((a) => a.toLowerCase());
+        return authors.some((a) => qt.every((t) => a.includes(t)));
       }
-
-      function authorMatchesAllTokensFuzzy(volumeInfo, queryTokens) {
-        const authors = (volumeInfo?.authors || []).map((a) => a.toLowerCase());
-        if (authors.length === 0) return false;
-        return queryTokens.every((t) => authors.some((a) => fuzzyContains(a, t)));
+      function authorMatchesAllTokensFuzzy(vi, qt) {
+        const authors = (vi?.authors || []).map((a) => a.toLowerCase());
+        if (!authors.length) return false;
+        return qt.every((t) => authors.some((a) => fuzzyContains(a, t)));
       }
-
-      function titleMatchesTokens(volumeInfo, queryTokens) {
-        const t = [volumeInfo?.title, volumeInfo?.subtitle].filter(Boolean).join(" ").toLowerCase();
-        const qTokens = contentTokens(queryTokens);
-        if (qTokens.length === 0) return false;
-        return qTokens.every((tk) => t.includes(tk));
+      function titleMatchesTokens(vi, qt) {
+        const t = [vi?.title, vi?.subtitle].filter(Boolean).join(" ").toLowerCase();
+        const qt2 = contentTokens(qt);
+        return qt2.length > 0 && qt2.every((tk) => t.includes(tk));
       }
-
-      function titleMatchesTokensFuzzy(volumeInfo, queryTokens) {
-        const t = [volumeInfo?.title, volumeInfo?.subtitle].filter(Boolean).join(" ").toLowerCase();
+      function titleMatchesTokensFuzzy(vi, qt) {
+        const t = [vi?.title, vi?.subtitle].filter(Boolean).join(" ").toLowerCase();
         if (!t) return false;
-        const qTokens = contentTokens(queryTokens);
-        if (qTokens.length === 0) return false;
-        return qTokens.every((tk) => fuzzyContains(t, tk));
+        const qt2 = contentTokens(qt);
+        return qt2.length > 0 && qt2.every((tk) => fuzzyContains(t, tk));
       }
-
-      function scoreVolume(volumeInfo, q, { titleBias = false } = {}) {
+      function scoreVolume(vi, q, { titleBias = false } = {}) {
         const tokens = tokenize(q);
-        const fullTitle = [volumeInfo.title, volumeInfo.subtitle].filter(Boolean).join(" ").toLowerCase();
-        const authors = (volumeInfo.authors || []).map((a) => a.toLowerCase());
+        const fullTitle = [vi.title, vi.subtitle].filter(Boolean).join(" ").toLowerCase();
+        const authors = (vi.authors || []).map((a) => a.toLowerCase());
         const authorStr = authors.join(" ");
         const phrase = contentTokens(tokens).join(" ");
-        const lang = (volumeInfo.language || "").toLowerCase();
-
+        const lang = (vi.language || "").toLowerCase();
         let score = 0;
         if (lang === "en" || lang === "da") score += 4; else if (lang) score -= 0.5;
         if (phrase && fullTitle.includes(phrase)) score += titleBias ? 5 : 3;
@@ -206,11 +207,7 @@
         const qLoose = normalizeLoose(q);
         score += (titleBias ? 1.2 : 2) * similarity(authorStr, qLoose);
         score += (titleBias ? 2.2 : 1.7) * similarity(fullTitle, qLoose);
-        const y = yearFromPublishedDate(volumeInfo.publishedDate || "");
-        if (y) {
-          const yr = parseInt(y, 10);
-          if (!Number.isNaN(yr)) score += Math.min(1.5, (yr - 1990) / 50);
-        }
+        // Year bias removed — classics should not be penalized
         return score;
       }
 
@@ -219,43 +216,37 @@
         if (isbn) {
           const json = await googleFetch({ q: `isbn:${isbn}`, maxResults: 1, fields: "items(volumeInfo)" }, { signal });
           const v = json.items?.[0]?.volumeInfo;
-          return v ? [v] : [];
+          return { results: v ? [v] : [], partial: false };
         }
-
         const q = query.trim();
         const tokens = tokenize(q);
         const titleLike = looksLikeTitle(q);
-        const fields =
-          "items(volumeInfo/title,volumeInfo/subtitle,volumeInfo/authors,volumeInfo/imageLinks/thumbnail,volumeInfo/description,volumeInfo/industryIdentifiers,volumeInfo/pageCount,volumeInfo/publishedDate,volumeInfo/publisher,volumeInfo/language)";
-
-        const queries = [];
+        const fields = "items(volumeInfo/title,volumeInfo/subtitle,volumeInfo/authors,volumeInfo/imageLinks/thumbnail,volumeInfo/description,volumeInfo/industryIdentifiers,volumeInfo/pageCount,volumeInfo/publishedDate,volumeInfo/publisher,volumeInfo/language)";
         const quoted = `"${q}"`;
-        if (titleLike) {
-          queries.push(
-            { q: `intitle:${q}`, maxResults: 10, fields, langRestrict: 'en' },
-            { q: `intitle:${q}`, maxResults: 10, fields, langRestrict: 'da' },
-            { q: quoted,       maxResults: 10, fields, langRestrict: 'en' },
-            { q: quoted,       maxResults: 10, fields, langRestrict: 'da' },
-            { q: `intitle:${q}`, maxResults: 10, fields },
-            { q: quoted,         maxResults: 10, fields },
-            { q: q,              maxResults: 10, fields }
-          );
-        } else {
-          queries.push(
-            { q: `inauthor:${q}`, maxResults: 10, fields, langRestrict: 'en' },
-            { q: `inauthor:${q}`, maxResults: 10, fields, langRestrict: 'da' },
-            { q: `intitle:${q}`,  maxResults: 10, fields, langRestrict: 'en' },
-            { q: `intitle:${q}`,  maxResults: 10, fields, langRestrict: 'da' },
-            { q: `inauthor:${q}`, maxResults: 10, fields },
-            { q: `intitle:${q}`,  maxResults: 10, fields },
-            { q: q,               maxResults: 10, fields }
-          );
-        }
-
-        const results = await Promise.allSettled(queries.map((p) => googleFetch(p, { signal })));
+        const queries = titleLike ? [
+          { q: `intitle:${q}`, maxResults: GOOGLE_MAX_RESULTS, fields, langRestrict: 'en' },
+          { q: `intitle:${q}`, maxResults: GOOGLE_MAX_RESULTS, fields, langRestrict: 'da' },
+          { q: quoted,         maxResults: GOOGLE_MAX_RESULTS, fields, langRestrict: 'en' },
+          { q: quoted,         maxResults: GOOGLE_MAX_RESULTS, fields, langRestrict: 'da' },
+          { q: `intitle:${q}`, maxResults: GOOGLE_MAX_RESULTS, fields },
+          { q: quoted,         maxResults: GOOGLE_MAX_RESULTS, fields },
+          { q: q,              maxResults: GOOGLE_MAX_RESULTS, fields },
+        ] : [
+          { q: `inauthor:${q}`, maxResults: GOOGLE_MAX_RESULTS, fields, langRestrict: 'en' },
+          { q: `inauthor:${q}`, maxResults: GOOGLE_MAX_RESULTS, fields, langRestrict: 'da' },
+          { q: `intitle:${q}`,  maxResults: GOOGLE_MAX_RESULTS, fields, langRestrict: 'en' },
+          { q: `intitle:${q}`,  maxResults: GOOGLE_MAX_RESULTS, fields, langRestrict: 'da' },
+          { q: `inauthor:${q}`, maxResults: GOOGLE_MAX_RESULTS, fields },
+          { q: `intitle:${q}`,  maxResults: GOOGLE_MAX_RESULTS, fields },
+          { q: q,               maxResults: GOOGLE_MAX_RESULTS, fields },
+        ];
+        const settled = await Promise.allSettled(queries.map((p) => googleFetch(p, { signal })));
         const vols = [];
-        for (const r of results) if (r.status === "fulfilled") (r.value.items || []).forEach((it) => vols.push(it.volumeInfo || {}));
-
+        let anyFailed = false;
+        for (const r of settled) {
+          if (r.status === "fulfilled") (r.value.items || []).forEach((it) => vols.push(it.volumeInfo || {}));
+          else anyFailed = true;
+        }
         const dedup = new Map();
         for (const v of vols) {
           const key = `${(v.title || "").toLowerCase()}::${(v.authors?.[0] || "").toLowerCase()}`;
@@ -263,35 +254,49 @@
           dedup.set(key, v);
         }
         const all = Array.from(dedup.values());
-
         let strict = titleLike
           ? all.filter((v) => titleMatchesTokens(v, tokens))
           : all.filter((v) => authorMatchesAllTokens(v, tokens) || titleMatchesTokens(v, tokens));
-
         let fuzzy = [];
         if (strict.length < 6) {
           fuzzy = titleLike
             ? all.filter((v) => titleMatchesTokensFuzzy(v, tokens))
             : all.filter((v) => authorMatchesAllTokensFuzzy(v, tokens) || titleMatchesTokensFuzzy(v, tokens));
         }
-
         const merged = [];
         const seen = new Set();
         for (const v of [...strict, ...fuzzy]) {
           const key = `${(v.title || "").toLowerCase()}::${(v.authors?.[0] || "").toLowerCase()}`;
           if (!seen.has(key)) { seen.add(key); merged.push(v); }
         }
-
         merged.sort((a, b) => scoreVolume(b, q, { titleBias: titleLike }) - scoreVolume(a, q, { titleBias: titleLike }));
-        return merged.slice(0, 8);
+        return { results: merged.slice(0, SEARCH_MAX_RESULTS), partial: anyFailed };
       }
 
       /* ---------------------------- Persistence ---------------------------- */
       const LS_KEY = 'bookclub.books.v1';
+      const STATUS_KEY = 'bookclub.status.v1';
       const supaUrl = window.SUPABASE_URL || '';
-      const supaKey = window.SUPABASE_ANON_KEY || localStorage.getItem('SUPA_ANON') || '';
+      const supaKey = localStorage.getItem('SUPA_ANON') || '';
       const hasSupabase = !!(supaUrl && supaKey && window.supabase);
-      const supa = hasSupabase ? window.supabase.createClient(supaUrl, supaKey) : null;
+      let supa = null;
+      if (hasSupabase) {
+        try { supa = window.supabase.createClient(supaUrl, supaKey); } catch (_) {}
+      }
+
+      /* Reading status stored in localStorage regardless of backend (no schema change needed) */
+      function statusKey(book) {
+        return `${(book.title || '').toLowerCase()}::${(book.author || '').toLowerCase()}`;
+      }
+      function loadStatusMap() {
+        try { return JSON.parse(localStorage.getItem(STATUS_KEY) || '{}'); } catch { return {}; }
+      }
+      function saveStatusEntry(book, status) {
+        const map = loadStatusMap();
+        const k = statusKey(book);
+        if (status) map[k] = status; else delete map[k];
+        localStorage.setItem(STATUS_KEY, JSON.stringify(map));
+      }
 
       function dedupeBooks(arr) {
         const map = new Map();
@@ -301,64 +306,65 @@
         });
         return Array.from(map.values());
       }
-
       function bookToRow(b) {
         return {
-          title: b.title || null,
-          author: b.author || null,
-          cover: b.cover || null,
-          description: b.description || null,
-          year: b.year || null,
+          title: b.title || null, author: b.author || null, cover: b.cover || null,
+          description: b.description || null, year: b.year || null,
           pages: typeof b.pages === 'number' ? b.pages : null,
-          publisher: b.publisher || null,
-          language: b.language || null,
-          isbn: b.isbn || null,
+          publisher: b.publisher || null, language: b.language || null, isbn: b.isbn || null,
         };
       }
       function rowToBook(r) {
         return {
-          title: r.title || '',
-          author: r.author || '',
-          cover: r.cover || '',
-          description: r.description || '',
-          year: r.year || '',
-          pages: (typeof r.pages === 'number' ? r.pages : undefined),
-          publisher: r.publisher || '',
-          language: r.language || '',
-          isbn: r.isbn || '',
+          id: r.id, title: r.title || '', author: r.author || '', cover: r.cover || '',
+          description: r.description || '', year: r.year || '',
+          pages: typeof r.pages === 'number' ? r.pages : null,
+          publisher: r.publisher || '', language: r.language || '', isbn: r.isbn || '',
         };
       }
-
       async function storageListBooks() {
         if (supa) {
           const { data, error } = await supa
             .from('books')
-            .select('title, author, cover, description, year, pages, publisher, language, isbn, created_at')
+            .select('id, title, author, cover, description, year, pages, publisher, language, isbn, created_at')
             .order('created_at', { ascending: true });
           if (error) throw error;
           return (data || []).map(rowToBook);
-        } else {
-          const raw = localStorage.getItem(LS_KEY);
-          return raw ? JSON.parse(raw) : [];
         }
+        const raw = localStorage.getItem(LS_KEY);
+        return raw ? JSON.parse(raw) : [];
       }
-
       async function storageInsertBooks(batch) {
         if (!batch || batch.length === 0) return [];
         if (supa) {
-          const rows = batch.map(bookToRow);
-          const { data, error } = await supa.from('books').insert(rows).select('title, author, cover, description, year, pages, publisher, language, isbn, created_at');
+          const { data, error } = await supa.from('books').insert(batch.map(bookToRow))
+            .select('id, title, author, cover, description, year, pages, publisher, language, isbn, created_at');
           if (error) throw error;
           return (data || []).map(rowToBook);
+        }
+        const current = await storageListBooks();
+        const merged = dedupeBooks([...current, ...batch]);
+        localStorage.setItem(LS_KEY, JSON.stringify(merged));
+        return batch;
+      }
+      async function storageDeleteBook(book) {
+        if (supa) {
+          const q = book.id
+            ? supa.from('books').delete().eq('id', book.id)
+            : supa.from('books').delete().eq('title', book.title || '').eq('author', book.author || '');
+          const { error } = await q;
+          if (error) throw error;
         } else {
           const current = await storageListBooks();
-          const merged = dedupeBooks([...current, ...batch]);
-          localStorage.setItem(LS_KEY, JSON.stringify(merged));
-          return batch;
+          const filtered = current.filter((b) =>
+            !(b.title.toLowerCase() === (book.title || '').toLowerCase() &&
+              b.author.toLowerCase() === (book.author || '').toLowerCase())
+          );
+          localStorage.setItem(LS_KEY, JSON.stringify(filtered));
         }
       }
 
-      /* Helpers for vendor links (title-only query) */
+      /* Vendor link helpers */
       function vendorSearchQuery(book) {
         return encodeURIComponent(book?.title || "").replace(/%20/g, "+");
       }
@@ -366,51 +372,81 @@
         return encodeURIComponent(encodeURIComponent(book?.title || ""));
       }
 
-      /* ------------------------ Small components ------------------------ */
-      function BookCard({ book }) {
+      /* ------------------------ Shared UI components ------------------------ */
+      function CoverImg({ src, alt, style }) {
+        const theme = useTheme();
+        const [failed, setFailed] = useState(false);
+        if (!src || failed) {
+          return <div style={{ display: 'grid', placeContent: 'center', height: '100%', color: theme.textMuted, fontSize: 12 }}>No Cover</div>;
+        }
+        return <img src={src} alt={alt} style={style} onError={() => setFailed(true)} />;
+      }
+
+      const STATUS_COLORS = { "Want to Read": "#F59E0B", "Reading": "#3B82F6", "Read": "#22C55E" };
+      function StatusBadge({ status }) {
+        if (!status) return null;
+        return (
+          <span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: 999, fontSize: 11, fontWeight: 700, background: STATUS_COLORS[status] + '22', color: STATUS_COLORS[status], border: `1px solid ${STATUS_COLORS[status]}44` }}>
+            {status}
+          </span>
+        );
+      }
+
+      function StatusSelect({ book, statusMap, onChangeStatus }) {
+        const theme = useTheme();
+        const current = statusMap[statusKey(book)] || "";
+        return (
+          <select
+            aria-label={`Reading status for ${book.title}`}
+            value={current}
+            onChange={(e) => onChangeStatus(book, e.target.value)}
+            style={{ padding: '0.25rem 0.4rem', borderRadius: 6, border: `1px solid ${theme.border}`, background: theme.surface2, color: current ? STATUS_COLORS[current] : theme.textMuted, fontSize: 12, cursor: 'pointer', fontWeight: current ? 700 : 400 }}
+          >
+            <option value="">— Status</option>
+            {READ_STATUSES.filter(Boolean).map((s) => (
+              <option key={s} value={s} style={{ color: STATUS_COLORS[s] }}>{s}</option>
+            ))}
+          </select>
+        );
+      }
+
+      function BookCard({ book, statusMap, onChangeStatus }) {
+        const theme = useTheme();
         const query = vendorSearchQuery(book);
         const links = {
-          dba: `https://www.dba.dk/soeg/?soeg=${query}`,
+          dba:  `https://www.dba.dk/soeg/?soeg=${query}`,
           saxo: `https://www.saxo.com/dk/products/search?query=${query}`,
-          kkb: `https://bibliotek.kk.dk/search?q=${vendorSearchQueryKKB(book)}`,
+          kkb:  `https://bibliotek.kk.dk/search?q=${vendorSearchQueryKKB(book)}`,
         };
-        const linkStyle = {
-          display: 'inline-block',
-          padding: '0.45rem 0.7rem',
-          borderRadius: 8,
-          border: `1px solid ${theme.border}`,
-          background: theme.surface2,
-          color: theme.text,
-          fontSize: 12,
-          textDecoration: 'none',
-        };
+        const linkStyle = { display: 'inline-block', padding: '0.45rem 0.7rem', borderRadius: 8, border: `1px solid ${theme.border}`, background: theme.surface2, color: theme.text, fontSize: 12, textDecoration: 'none' };
+        const status = statusMap ? statusMap[statusKey(book)] || "" : "";
 
         return (
-          <div style={{ border: `1px solid ${theme.border}`, borderRadius: 12, overflow: 'hidden', background: theme.surface, boxShadow: theme.shadow }}>
-            <div style={{ height: 160, background: theme.surface2 }}>
-              {book.cover ? (
-                <img src={book.cover} alt={book.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-              ) : (
-                <div style={{ display: 'grid', placeContent: 'center', height: '100%', color: theme.textMuted }}>No Cover</div>
-              )}
+          <div style={{ border: `1px solid ${theme.border}`, borderRadius: 12, overflow: 'hidden', background: theme.surface, boxShadow: theme.shadow, display: 'flex', flexDirection: 'column' }}>
+            <div style={{ height: CARD_COVER_HEIGHT, background: theme.surface2 }}>
+              <CoverImg src={book.cover} alt={book.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
             </div>
-            <div style={{ padding: 10 }}>
+            <div style={{ padding: 10, flex: 1, display: 'flex', flexDirection: 'column', gap: 4 }}>
               <div style={{ fontWeight: 700, color: theme.text }}>{book.title}</div>
               <div style={{ color: theme.textMuted, fontSize: 13 }}>{book.author}</div>
-              <div style={{ color: theme.textMuted, fontSize: 12, marginTop: 4 }}>
+              <div style={{ color: theme.textMuted, fontSize: 12 }}>
                 <span>{book.year || '—'}</span>
-                {typeof book.pages === 'number' && <span> · {book.pages} pages</span>}
-                {book.publisher && <span> · {book.publisher}</span>}
+                {typeof book.pages === 'number' && <span> · {book.pages}p</span>}
                 {book.language && <span> · {book.language}</span>}
               </div>
+              {status && <StatusBadge status={status} />}
               {book.description && (
-                <p style={{ color: theme.text, fontSize: 13, marginTop: 6, marginBottom: 0, whiteSpace: 'pre-line' }}>{book.description}</p>
+                <p style={{ color: theme.text, fontSize: 13, margin: '4px 0 0', whiteSpace: 'pre-line', flex: 1 }}>{book.description}</p>
               )}
-              {/* Vendor links (Title only, per request) */}
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
-                <a href={links.dba} target="_blank" rel="noopener noreferrer" style={linkStyle}>Køb på DBA</a>
-                <a href={links.saxo} target="_blank" rel="noopener noreferrer" style={linkStyle}>Køb på Saxo</a>
-                <a href={links.kkb} target="_blank" rel="noopener noreferrer" style={linkStyle}>Lån på KKB</a>
+              {onChangeStatus && (
+                <div style={{ marginTop: 6 }}>
+                  <StatusSelect book={book} statusMap={statusMap} onChangeStatus={onChangeStatus} />
+                </div>
+              )}
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+                <a href={links.dba}  target="_blank" rel="noopener noreferrer" style={linkStyle} aria-label={`Buy "${book.title}" on DBA`}>Køb på DBA</a>
+                <a href={links.saxo} target="_blank" rel="noopener noreferrer" style={linkStyle} aria-label={`Buy "${book.title}" on Saxo`}>Køb på Saxo</a>
+                <a href={links.kkb}  target="_blank" rel="noopener noreferrer" style={linkStyle} aria-label={`Borrow "${book.title}" at KKB`}>Lån på KKB</a>
               </div>
             </div>
           </div>
@@ -419,56 +455,85 @@
 
       /* ------------------------------- App --------------------------------- */
       function BookClubApp() {
-        const [books, setBooks] = useState([]); // persisted storage
+        const [darkMode, setDarkMode] = useState(() => {
+          const saved = localStorage.getItem('bookclub.darkMode');
+          if (saved !== null) return saved === 'true';
+          return window.matchMedia('(prefers-color-scheme: dark)').matches;
+        });
+        const theme = darkMode ? darkTheme : lightTheme;
+
+        // Sync body background with theme
+        useEffect(() => {
+          document.body.style.background = theme.bodyBg;
+        }, [theme.bodyBg]);
+
+        const [books, setBooks] = useState([]);
         const [recentBatch, setRecentBatch] = useState([]);
         const [activeTab, setActiveTab] = useState("add");
         const [search, setSearch] = useState("");
         const [sugg, setSugg] = useState([]);
         const [searchBusy, setSearchBusy] = useState(false);
         const [searchErr, setSearchErr] = useState("");
-        const [draft, setDraft] = useState({ isbn: "", title: "", author: "", cover: "", description: "", year: "", pages: undefined, publisher: "", language: "" });
+        const [searchPartial, setSearchPartial] = useState(false);
+        const [draft, setDraft] = useState({ isbn: "", title: "", author: "", cover: "", description: "", year: "", pages: null, publisher: "", language: "" });
         const [staging, setStaging] = useState([]);
         const [loadBusy, setLoadBusy] = useState(true);
         const [loadErr, setLoadErr] = useState("");
+        const [supaOk, setSupaOk] = useState(true);
+        const [libraryFilter, setLibraryFilter] = useState("");
+        const [allBooksView, setAllBooksView] = useState("table"); // "table" | "cards"
+        const [statusMap, setStatusMap] = useState(() => loadStatusMap());
+        const lastSearchedRef = useRef("");
 
-        useEffect(() => { document.title = `${CLUB_NAME}`; }, []);
+        useEffect(() => { document.title = CLUB_NAME; }, []);
 
-        // Initial load from storage (Supabase or local)
         useEffect(() => {
           (async () => {
             try {
               setLoadBusy(true);
               const list = await storageListBooks();
               setBooks(list);
+              if (supa) setSupaOk(true);
             } catch (e) {
               console.error(e);
               setLoadErr("Failed to load library");
+              if (supa) setSupaOk(false);
             } finally {
               setLoadBusy(false);
             }
           })();
         }, []);
 
-        // Debounced, abortable search (Add tab)
         useEffect(() => {
           if (activeTab !== "add") return;
           const q = search.trim();
           setSearchErr("");
-          if (q.length < 3) { setSugg([]); return; }
+          setSearchPartial(false);
+          if (q.length < 3) { setSugg([]); lastSearchedRef.current = ""; return; }
+          if (q === lastSearchedRef.current) return;
           const ctl = new AbortController();
           const t = setTimeout(async () => {
             setSearchBusy(true);
             try {
-              const results = await unifiedSearch(q, { signal: ctl.signal });
+              const { results, partial } = await unifiedSearch(q, { signal: ctl.signal });
               setSugg(results);
+              setSearchPartial(partial);
+              lastSearchedRef.current = q;
             } catch (e) {
               if (e?.name !== "AbortError") setSearchErr("Search failed. Try again.");
             } finally {
               setSearchBusy(false);
             }
-          }, 250);
+          }, SEARCH_DEBOUNCE_MS);
           return () => { clearTimeout(t); ctl.abort(); };
         }, [search, activeTab]);
+
+        function toggleDarkMode() {
+          setDarkMode((d) => {
+            localStorage.setItem('bookclub.darkMode', String(!d));
+            return !d;
+          });
+        }
 
         function selectVolume(v) {
           setDraft({
@@ -478,35 +543,35 @@
             cover: v.imageLinks?.thumbnail?.replace("http://", "https://") || "",
             description: v.description || "",
             year: yearFromPublishedDate(v.publishedDate),
-            pages: v.pageCount,
+            pages: typeof v.pageCount === 'number' ? v.pageCount : null,
             publisher: v.publisher || "",
             language: (v.language || "").toUpperCase(),
           });
           setSugg([]);
+          setSearchPartial(false);
           const label = [v.title, (v.authors && v.authors[0])].filter(Boolean).join(" — ");
           setSearch(label);
+          lastSearchedRef.current = label;
         }
 
         function queueBook() {
           if (!draft.title || !draft.author) return;
-          const key = `${draft.title}::${draft.author}`;
-          const exists = staging.some((b) => `${b.title}::${b.author}` === key);
+          const key = `${draft.title.toLowerCase()}::${draft.author.toLowerCase()}`;
+          const exists = staging.some((b) => `${b.title.toLowerCase()}::${b.author.toLowerCase()}` === key);
           if (!exists)
-            setStaging((q) => [
-              ...q,
-              { title: draft.title, author: draft.author, cover: draft.cover, description: draft.description, year: draft.year, pages: draft.pages, publisher: draft.publisher, language: draft.language, isbn: draft.isbn },
-            ]);
-          setDraft({ isbn: "", title: "", author: "", cover: "", description: "", year: "", pages: undefined, publisher: "", language: "" });
+            setStaging((q) => [...q, { title: draft.title, author: draft.author, cover: draft.cover, description: draft.description, year: draft.year, pages: draft.pages, publisher: draft.publisher, language: draft.language, isbn: draft.isbn }]);
+          setDraft({ isbn: "", title: "", author: "", cover: "", description: "", year: "", pages: null, publisher: "", language: "" });
           setSearch("");
+          lastSearchedRef.current = "";
         }
 
         function removeFromStaging(index) { setStaging((q) => q.filter((_, i) => i !== index)); }
 
         async function commitBatch() {
           if (staging.length === 0) return;
+          if (!window.confirm(`Add ${staging.length} book${staging.length !== 1 ? 's' : ''} to your library?`)) return;
           try {
             const inserted = await storageInsertBooks(staging);
-            // Merge into UI state
             setBooks((prev) => dedupeBooks([...prev, ...inserted]));
             setRecentBatch(staging);
             setStaging([]);
@@ -517,187 +582,304 @@
           }
         }
 
-        const storageBadge = hasSupabase ? "Cloud (Supabase)" : "Local (this browser)";
+        async function deleteBook(book) {
+          if (!window.confirm(`Remove "${book.title}" from your library?`)) return;
+          try {
+            await storageDeleteBook(book);
+            setBooks((prev) => prev.filter((b) =>
+              !(b.title.toLowerCase() === (book.title || '').toLowerCase() &&
+                b.author.toLowerCase() === (book.author || '').toLowerCase())
+            ));
+          } catch (e) {
+            console.error(e);
+            alert("Failed to remove book. Please try again.");
+          }
+        }
+
+        function handleChangeStatus(book, status) {
+          saveStatusEntry(book, status);
+          setStatusMap(loadStatusMap());
+        }
+
+        const storageBadge = hasSupabase
+          ? (supaOk ? "Cloud (Supabase)" : "Cloud (Supabase — connection error)")
+          : "Local (this browser)";
+
+        const filteredBooks = libraryFilter.trim()
+          ? books.filter((b) => {
+              const f = libraryFilter.toLowerCase();
+              return (b.title || '').toLowerCase().includes(f) ||
+                     (b.author || '').toLowerCase().includes(f) ||
+                     (b.publisher || '').toLowerCase().includes(f) ||
+                     (b.language || '').toLowerCase().includes(f);
+            })
+          : books;
+
+        // Derived: per-status counts for the All Books tab header
+        const statusCounts = READ_STATUSES.filter(Boolean).reduce((acc, s) => {
+          acc[s] = books.filter((b) => statusMap[statusKey(b)] === s).length;
+          return acc;
+        }, {});
+
+        const btnBase = { padding: '0.35rem 0.6rem', borderRadius: 8, border: `1px solid ${theme.border}`, background: theme.surface2, color: theme.text, cursor: 'pointer', fontSize: 12 };
+        const dangerBtn = { ...btnBase, border: `1px solid ${theme.danger}`, background: 'transparent', color: theme.danger };
 
         return (
-          <div style={{ minHeight: "100vh", background: `radial-gradient(1200px 600px at 50% -10%, #111827 0%, ${theme.bg} 60%)`, color: theme.text }}>
-            <div style={{ padding: "1.25rem", maxWidth: 1100, margin: "0 auto" }}>
-              <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
-                <h1 style={{ fontSize: "1.875rem", fontWeight: 800, margin: 0 }}>📚 {CLUB_NAME}</h1>
-                <div style={{ fontSize: 12, color: theme.textMuted, display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span>Storage: {storageBadge}</span>
-                {(!hasSupabase && supaUrl) && (
-                  <button onClick={() => {
-                    const k = prompt('Paste your Supabase anon public key');
-                    if (k) { localStorage.setItem('SUPA_ANON', k); location.reload(); }
-                  }} style={{ padding: '0.35rem 0.6rem', borderRadius: 8, border: `1px solid ${theme.border}`, background: theme.surface2, color: theme.text, cursor: 'pointer', fontSize: 12 }}>
-                    Set anon key
-                  </button>
-                )}
-                {hasSupabase && (
-                  <button onClick={() => { if (confirm('Remove locally stored anon key?')) { localStorage.removeItem('SUPA_ANON'); location.reload(); } }} style={{ padding: '0.35rem 0.6rem', borderRadius: 8, border: `1px solid ${theme.border}`, background: theme.surface2, color: theme.text, cursor: 'pointer', fontSize: 12 }}>
-                    Sign out
-                  </button>
-                )}
-              </div>
-              </header>
+          <ThemeCtx.Provider value={theme}>
+            <div style={{ minHeight: "100vh", background: darkMode ? `radial-gradient(1200px 600px at 50% -10%, #111827 0%, ${theme.bg} 60%)` : theme.bg, color: theme.text }}>
+              <div style={{ padding: "1.25rem", maxWidth: 1100, margin: "0 auto" }}>
 
-              {/* Tabs */}
-              <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-                {[{ id: "add", label: "Add Books" }, { id: "all", label: "All Books" }, { id: "recent", label: "Recent Batch" }].map((t) => (
-                  <button key={t.id} onClick={() => setActiveTab(t.id)} style={{ padding: "0.5rem 0.875rem", borderRadius: 999, border: `1px solid ${theme.border}`, cursor: "pointer", fontWeight: 700, background: activeTab === t.id ? theme.accent : theme.surface2, color: activeTab === t.id ? theme.accentText : theme.text }}>
-                    {t.label}
-                  </button>
-                ))}
-              </div>
-
-              {activeTab === "add" && (
-                <div style={{ display: "grid", gap: 16 }}>
-                  <div style={{ position: "relative" }}>
-                    <input style={{ width: "100%", padding: "0.75rem 0.9rem", border: `1px solid ${theme.border}`, borderRadius: 10, fontSize: "1rem", color: theme.text, background: theme.surface2, outline: "none", boxShadow: "none" }} placeholder="Type author, title, or ISBN (e.g., 'Torrey Peters' or '9783161484100')" value={search} onChange={(e) => setSearch(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && sugg[0]) selectVolume(sugg[0]); }} />
-                    {(sugg.length > 0 || searchBusy || (search.trim().length >= 3 && !searchBusy)) && (
-                      <ul role="listbox" style={{ position: "absolute", top: "100%", left: 0, right: 0, background: theme.surface, border: `1px solid ${theme.border}`, borderTop: "none", maxHeight: 240, overflowY: "auto", zIndex: 10, boxShadow: theme.shadow }}>
-                        {sugg.map((v, i) => (
-                          <li role="option" tabIndex={0} key={`${v.title}-${(v.authors && v.authors[0]) || ""}-${i}`} style={{ padding: "0.6rem 0.75rem", cursor: "pointer", borderBottom: `1px solid ${theme.border}`, color: theme.text }} onMouseDown={() => selectVolume(v)} onKeyDown={(e) => { if (e.key === "Enter") selectVolume(v); }}>
-                            <strong style={{ color: theme.text }}>{v.title}</strong>
-                            {v.authors && <span style={{ fontSize: "0.875rem", color: theme.textMuted }}> — {v.authors.join(", ")}</span>}
-                          </li>
-                        ))}
-                        {searchBusy && <li style={{ padding: "0.6rem 0.75rem", color: theme.textMuted }}>Searching…</li>}
-                        {!searchBusy && search.trim().length >= 3 && sugg.length === 0 && (<li style={{ padding: "0.6rem 0.75rem", color: theme.textMuted }}>No results</li>)}
-                      </ul>
+                <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, gap: 8, flexWrap: 'wrap' }}>
+                  <h1 style={{ fontSize: "1.875rem", fontWeight: 800, margin: 0 }}>📚 {CLUB_NAME}</h1>
+                  <div style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <span style={{ color: (hasSupabase && !supaOk) ? theme.danger : theme.textMuted }}>
+                      Storage: {storageBadge}
+                    </span>
+                    {(!hasSupabase && supaUrl) && (
+                      <button aria-label="Set Supabase anon key" onClick={() => { const k = prompt('Paste your Supabase anon public key'); if (k) { localStorage.setItem('SUPA_ANON', k); location.reload(); } }} style={btnBase}>
+                        Set anon key
+                      </button>
                     )}
-                    {searchErr && <p style={{ color: theme.danger, fontSize: "0.875rem", marginTop: 4 }}>{searchErr}</p>}
-                  </div>
-
-                  {draft.title && (
-                    <div style={{ border: `1px solid ${theme.border}`, borderRadius: 14, overflow: "hidden", background: theme.surface, boxShadow: theme.shadow }}>
-                      <div style={{ height: 180, background: theme.surface2, position: "relative" }}>
-                        {draft.cover ? (<img src={draft.cover} alt={draft.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} />) : (<div style={{ display: "grid", placeContent: "center", height: "100%", color: theme.textMuted }}>No Cover</div>)}
-                        <div style={{ position: "absolute", bottom: 0, left: 0, width: "100%", padding: "0.5rem 0.75rem", background: "linear-gradient(to top, rgba(0,0,0,0.65), transparent)", color: theme.text }}>
-                          <h4 style={{ margin: 0 }}>{draft.title}</h4>
-                          <p style={{ margin: 0, fontSize: 14, color: theme.textMuted }}>{draft.author}</p>
-                        </div>
-                      </div>
-                      <div style={{ padding: "0.75rem" }}>
-                        <div style={{ color: theme.textMuted, fontSize: 14 }}>
-                          <span>{draft.year || "—"}</span>
-                          {typeof draft.pages === "number" && <span> · {draft.pages} pages</span>}
-                          {draft.publisher && <span> · {draft.publisher}</span>}
-                          {draft.language && <span> · {draft.language}</span>}
-                        </div>
-                        <p style={{ margin: "6px 0 0", color: theme.text, whiteSpace: "pre-line" }}>{draft.description || "No description provided."}</p>
-                        <button onClick={() => queueBook()} style={{ padding: "0.7rem 1rem", borderRadius: 10, border: "none", background: theme.accent, color: theme.accentText, cursor: "pointer", fontSize: "1rem", boxShadow: theme.shadow, width: "100%", marginTop: 12 }}>Queue Book</button>
-                      </div>
-                    </div>
-                  )}
-
-                  <div>
-                    <h4 style={{ margin: "0 0 8px 0", color: theme.text }}>Staging ({staging.length})</h4>
-                    {staging.length === 0 ? (
-                      <p style={{ margin: 0, color: theme.textMuted }}>No books queued yet.</p>
-                    ) : (
-                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 12 }}>
-                        {staging.map((b, i) => (
-                          <div key={`${b.title}-${i}`} style={{ border: `1px solid ${theme.border}`, borderRadius: 12, overflow: "hidden", background: theme.surface }}>
-                            <div style={{ height: 120, background: theme.surface2 }}>
-                              {b.cover ? (<img src={b.cover} alt={b.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} />) : (<div style={{ display: "grid", placeContent: "center", height: "100%", color: theme.textMuted }}>No Cover</div>)}
-                            </div>
-                            <div style={{ padding: 8 }}>
-                              <div style={{ fontWeight: 700, color: theme.text }}>{b.title}</div>
-                              <div style={{ color: theme.textMuted, fontSize: 13 }}>{b.author}</div>
-                              <div style={{ color: theme.textMuted, fontSize: 12, marginTop: 4 }}>
-                                <span>{b.year || "—"}</span>
-                                {typeof b.pages === "number" && <span> · {b.pages} pages</span>}
-                                {b.publisher && <span> · {b.publisher}</span>}
-                                {b.language && <span> · {b.language}</span>}
-                              </div>
-                              <button onClick={() => removeFromStaging(i)} style={{ padding: "0.35rem 0.6rem", borderRadius: 8, border: `1px solid ${theme.border}`, background: theme.surface2, color: theme.text, cursor: "pointer", fontSize: 12, marginTop: 8 }}>Remove</button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
+                    {hasSupabase && (
+                      <button aria-label="Sign out from Supabase" onClick={() => { if (confirm('Remove locally stored anon key?')) { localStorage.removeItem('SUPA_ANON'); location.reload(); } }} style={btnBase}>
+                        Sign out
+                      </button>
                     )}
+                    <button aria-label={darkMode ? "Switch to light mode" : "Switch to dark mode"} onClick={toggleDarkMode} style={btnBase}>
+                      {darkMode ? "☀ Light" : "☾ Dark"}
+                    </button>
                   </div>
+                </header>
 
-                  <button onClick={() => commitBatch()} disabled={staging.length === 0} style={{ padding: "0.7rem 1rem", borderRadius: 10, border: "none", background: theme.accent, color: theme.accentText, cursor: "pointer", fontSize: "1rem", boxShadow: theme.shadow, width: "100%", opacity: staging.length === 0 ? 0.6 : 1 }}>Add {staging.length || "0"} to Library</button>
+                {/* Tabs */}
+                <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+                  {[
+                    { id: "add",    label: "Add Books" },
+                    { id: "all",    label: `All Books (${books.length})` },
+                    { id: "recent", label: "Recent Batch" },
+                  ].map((t) => (
+                    <button key={t.id} onClick={() => setActiveTab(t.id)} aria-selected={activeTab === t.id} style={{ padding: "0.5rem 0.875rem", borderRadius: 999, border: `1px solid ${theme.border}`, cursor: "pointer", fontWeight: 700, background: activeTab === t.id ? theme.accent : theme.surface2, color: activeTab === t.id ? theme.accentText : theme.text }}>
+                      {t.label}
+                    </button>
+                  ))}
                 </div>
-              )}
 
-              {activeTab === "all" && (
-                <div>
-                  {loadBusy ? (
-                    <p style={{ color: theme.textMuted }}>Loading library…</p>
-                  ) : loadErr ? (
-                    <p style={{ color: theme.danger }}>{loadErr}</p>
-                  ) : (
-                    <>
-                      <div style={{ marginBottom: 12, color: theme.textMuted }}>{books.length} book{books.length !== 1 ? "s" : ""} total</div>
-                      {books.length === 0 ? (
-                        <p style={{ color: theme.textMuted }}>No books yet. Add some from the Add Books tab.</p>
+                {/* ── Add Books ── */}
+                {activeTab === "add" && (
+                  <div style={{ display: "grid", gap: 16 }}>
+                    <div style={{ position: "relative" }}>
+                      <input
+                        aria-label="Search books by title, author, or ISBN"
+                        aria-expanded={sugg.length > 0}
+                        aria-autocomplete="list"
+                        role="combobox"
+                        style={{ width: "100%", padding: "0.75rem 0.9rem", border: `1px solid ${theme.border}`, borderRadius: 10, fontSize: "1rem", color: theme.text, background: theme.inputBg, outline: "none" }}
+                        placeholder="Type author, title, or ISBN (e.g., 'Torrey Peters' or '9783161484100')"
+                        value={search}
+                        onChange={(e) => setSearch(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter" && sugg[0]) selectVolume(sugg[0]); }}
+                      />
+                      {(sugg.length > 0 || searchBusy || (search.trim().length >= 3 && !searchBusy)) && (
+                        <ul role="listbox" style={{ position: "absolute", top: "100%", left: 0, right: 0, background: theme.surface, border: `1px solid ${theme.border}`, borderTop: "none", maxHeight: 240, overflowY: "auto", zIndex: 10, boxShadow: theme.shadow, margin: 0, padding: 0, listStyle: "none" }}>
+                          {sugg.map((v, i) => (
+                            <li role="option" tabIndex={0} key={`${v.title}-${(v.authors && v.authors[0]) || ""}-${i}`}
+                              style={{ padding: "0.6rem 0.75rem", cursor: "pointer", borderBottom: `1px solid ${theme.border}`, color: theme.text }}
+                              onMouseDown={() => selectVolume(v)}
+                              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") selectVolume(v); }}>
+                              <strong>{v.title}</strong>
+                              {v.authors && <span style={{ fontSize: "0.875rem", color: theme.textMuted }}> — {v.authors.join(", ")}</span>}
+                            </li>
+                          ))}
+                          {searchBusy && <li style={{ padding: "0.6rem 0.75rem", color: theme.textMuted }}>Searching…</li>}
+                          {!searchBusy && search.trim().length >= 3 && sugg.length === 0 && <li style={{ padding: "0.6rem 0.75rem", color: theme.textMuted }}>No results</li>}
+                        </ul>
+                      )}
+                      {searchErr && <p style={{ color: theme.danger, fontSize: "0.875rem", marginTop: 4 }}>{searchErr}</p>}
+                      {searchPartial && !searchErr && <p style={{ color: theme.textMuted, fontSize: "0.875rem", marginTop: 4 }}>Some search sources timed out — results may be incomplete.</p>}
+                    </div>
+
+                    {draft.title && (
+                      <div style={{ border: `1px solid ${theme.border}`, borderRadius: 14, overflow: "hidden", background: theme.surface, boxShadow: theme.shadow }}>
+                        <div style={{ height: DRAFT_COVER_HEIGHT, background: theme.surface2, position: "relative" }}>
+                          <CoverImg src={draft.cover} alt={draft.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                          <div style={{ position: "absolute", bottom: 0, left: 0, width: "100%", padding: "0.5rem 0.75rem", background: "linear-gradient(to top, rgba(0,0,0,0.65), transparent)", color: "#fff" }}>
+                            <h4 style={{ margin: 0 }}>{draft.title}</h4>
+                            <p style={{ margin: 0, fontSize: 14, opacity: 0.8 }}>{draft.author}</p>
+                          </div>
+                        </div>
+                        <div style={{ padding: "0.75rem" }}>
+                          <div style={{ color: theme.textMuted, fontSize: 14 }}>
+                            <span>{draft.year || "—"}</span>
+                            {typeof draft.pages === "number" && <span> · {draft.pages} pages</span>}
+                            {draft.publisher && <span> · {draft.publisher}</span>}
+                            {draft.language && <span> · {draft.language}</span>}
+                          </div>
+                          <p style={{ margin: "6px 0 0", color: theme.text, whiteSpace: "pre-line" }}>{draft.description || "No description provided."}</p>
+                          <button onClick={() => queueBook()} style={{ padding: "0.7rem 1rem", borderRadius: 10, border: "none", background: theme.accent, color: theme.accentText, cursor: "pointer", fontSize: "1rem", boxShadow: theme.shadow, width: "100%", marginTop: 12 }}>
+                            Queue Book
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <div>
+                      <h4 style={{ margin: "0 0 8px 0", color: theme.text }}>Staging ({staging.length})</h4>
+                      {staging.length === 0 ? (
+                        <p style={{ margin: 0, color: theme.textMuted }}>No books queued yet.</p>
                       ) : (
-                        <div style={{ overflowX: "auto", border: `1px solid ${theme.border}`, borderRadius: 12, boxShadow: theme.shadow }}>
-                          <table style={{ width: "100%", borderCollapse: "collapse", color: theme.text }}>
-                            <thead>
-                              <tr style={{ background: theme.surface2, textAlign: "left" }}>
-                                <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Book</th>
-                                <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Year</th>
-                                <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Pages</th>
-                                <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Publisher</th>
-                                <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Lang</th>
-                                <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Links</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {books.map((b, i) => (
-                                <tr key={`${b.title}-${i}`} style={{ borderTop: `1px solid ${theme.border}`, background: i % 2 ? theme.surface : theme.surface2 }}>
-                                  <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>
-                                    <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                                      <div style={{ width: 40, height: 60, background: theme.surface2, borderRadius: 6, overflow: "hidden", flex: "0 0 auto", border: `1px solid ${theme.border}` }}>
-                                        {b.cover ? (<img src={b.cover} alt={b.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} />) : null}
-                                      </div>
-                                      <div>
-                                        <div style={{ fontWeight: 700 }}>{b.title}</div>
-                                        <div style={{ color: theme.textMuted, fontSize: 13 }}>{b.author}</div>
-                                      </div>
-                                    </div>
-                                  </td>
-                                  <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>{b.year || "—"}</td>
-                                  <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>{typeof b.pages === "number" ? b.pages : "—"}</td>
-                                  <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>{b.publisher || "—"}</td>
-                                  <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>{b.language || "—"}</td>
-                                  <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14, color: theme.text }}>
-                                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                                      <a href={`https://www.dba.dk/soeg/?soeg=${vendorSearchQuery(b)}`} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-block', padding: '0.35rem 0.55rem', borderRadius: 8, border: `1px solid ${theme.border}`, background: theme.surface2, color: theme.text, textDecoration: 'none', fontSize: 12 }}>DBA</a>
-                                      <a href={`https://www.saxo.com/dk/products/search?query=${vendorSearchQuery(b)}`} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-block', padding: '0.35rem 0.55rem', borderRadius: 8, border: `1px solid ${theme.border}`, background: theme.surface2, color: theme.text, textDecoration: 'none', fontSize: 12 }}>Saxo</a>
-                                      <a href={`https://bibliotek.kk.dk/search?q=${vendorSearchQueryKKB(b)}`} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-block', padding: '0.35rem 0.55rem', borderRadius: 8, border: `1px solid ${theme.border}`, background: theme.surface2, color: theme.text, textDecoration: 'none', fontSize: 12 }}>KKB</a>
-                                    </div>
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 12 }}>
+                          {staging.map((b, i) => (
+                            <div key={`${b.title}-${i}`} style={{ border: `1px solid ${theme.border}`, borderRadius: 12, overflow: "hidden", background: theme.surface }}>
+                              <div style={{ height: STAGING_COVER_HEIGHT, background: theme.surface2 }}>
+                                <CoverImg src={b.cover} alt={b.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                              </div>
+                              <div style={{ padding: 8 }}>
+                                <div style={{ fontWeight: 700, color: theme.text }}>{b.title}</div>
+                                <div style={{ color: theme.textMuted, fontSize: 13 }}>{b.author}</div>
+                                <div style={{ color: theme.textMuted, fontSize: 12, marginTop: 4 }}>
+                                  <span>{b.year || "—"}</span>
+                                  {typeof b.pages === "number" && <span> · {b.pages}p</span>}
+                                  {b.language && <span> · {b.language}</span>}
+                                </div>
+                                <button aria-label={`Remove ${b.title} from staging`} onClick={() => removeFromStaging(i)} style={{ ...btnBase, marginTop: 8 }}>Remove</button>
+                              </div>
+                            </div>
+                          ))}
                         </div>
                       )}
-                    </>
-                  )}
-                </div>
-              )}
-
-              {activeTab === "recent" && (
-                <div>
-                  <div style={{ marginBottom: 12, color: theme.textMuted }}>{recentBatch.length} book{recentBatch.length !== 1 ? "s" : ""} in the last batch</div>
-                  {recentBatch.length === 0 ? (
-                    <p style={{ color: theme.textMuted }}>No recent batch. Queue books in the Add tab and commit them.</p>
-                  ) : (
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12 }}>
-                      {recentBatch.map((b, i) => (<BookCard key={`${b.title}-${i}`} book={b} />))}
                     </div>
-                  )}
-                </div>
-              )}
+
+                    <button onClick={() => commitBatch()} disabled={staging.length === 0} style={{ padding: "0.7rem 1rem", borderRadius: 10, border: "none", background: theme.accent, color: theme.accentText, cursor: "pointer", fontSize: "1rem", boxShadow: theme.shadow, width: "100%", opacity: staging.length === 0 ? 0.5 : 1 }}>
+                      Add {staging.length || "0"} to Library
+                    </button>
+                  </div>
+                )}
+
+                {/* ── All Books ── */}
+                {activeTab === "all" && (
+                  <div>
+                    {loadBusy ? (
+                      <p style={{ color: theme.textMuted }}>Loading library…</p>
+                    ) : loadErr ? (
+                      <p style={{ color: theme.danger }}>{loadErr}</p>
+                    ) : (
+                      <>
+                        {/* Status summary pills */}
+                        {books.length > 0 && (
+                          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+                            {READ_STATUSES.filter(Boolean).map((s) => (
+                              <span key={s} style={{ padding: '3px 10px', borderRadius: 999, fontSize: 12, fontWeight: 600, background: STATUS_COLORS[s] + '22', color: STATUS_COLORS[s], border: `1px solid ${STATUS_COLORS[s]}44` }}>
+                                {s}: {statusCounts[s]}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Filter + view toggle */}
+                        <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
+                          <input
+                            aria-label="Filter library"
+                            style={{ flex: 1, minWidth: 180, padding: "0.55rem 0.8rem", border: `1px solid ${theme.border}`, borderRadius: 8, fontSize: 14, color: theme.text, background: theme.inputBg, outline: "none" }}
+                            placeholder="Filter by title, author, publisher, or language…"
+                            value={libraryFilter}
+                            onChange={(e) => setLibraryFilter(e.target.value)}
+                          />
+                          <span style={{ color: theme.textMuted, fontSize: 13, whiteSpace: 'nowrap' }}>
+                            {libraryFilter.trim() ? `${filteredBooks.length} of ${books.length}` : books.length} book{books.length !== 1 ? "s" : ""}
+                          </span>
+                          <div style={{ display: 'flex', gap: 4 }}>
+                            <button aria-label="Table view" aria-pressed={allBooksView === 'table'} onClick={() => setAllBooksView('table')} style={{ ...btnBase, background: allBooksView === 'table' ? theme.accent : theme.surface2, color: allBooksView === 'table' ? theme.accentText : theme.text, border: `1px solid ${theme.border}` }}>☰ Table</button>
+                            <button aria-label="Card view" aria-pressed={allBooksView === 'cards'} onClick={() => setAllBooksView('cards')} style={{ ...btnBase, background: allBooksView === 'cards' ? theme.accent : theme.surface2, color: allBooksView === 'cards' ? theme.accentText : theme.text, border: `1px solid ${theme.border}` }}>⊞ Cards</button>
+                          </div>
+                        </div>
+
+                        {filteredBooks.length === 0 ? (
+                          <p style={{ color: theme.textMuted }}>{books.length === 0 ? "No books yet. Add some from the Add Books tab." : "No books match your filter."}</p>
+                        ) : allBooksView === 'cards' ? (
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12 }}>
+                            {filteredBooks.map((b, i) => (
+                              <div key={`${b.title}-${i}`} style={{ position: 'relative' }}>
+                                <BookCard book={b} statusMap={statusMap} onChangeStatus={handleChangeStatus} />
+                                <button aria-label={`Remove ${b.title} from library`} onClick={() => deleteBook(b)} style={{ ...dangerBtn, position: 'absolute', top: 8, right: 8, padding: '2px 8px', fontSize: 11 }}>✕</button>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div style={{ overflowX: "auto", border: `1px solid ${theme.border}`, borderRadius: 12, boxShadow: theme.shadow }}>
+                            <table style={{ width: "100%", borderCollapse: "collapse", color: theme.text }}>
+                              <thead>
+                                <tr style={{ background: theme.surface2, textAlign: "left" }}>
+                                  <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Book</th>
+                                  <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Year</th>
+                                  <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Pages</th>
+                                  <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Publisher</th>
+                                  <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Lang</th>
+                                  <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Status</th>
+                                  <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}>Links</th>
+                                  <th style={{ padding: "10px 12px", fontSize: 12, color: theme.textMuted, fontWeight: 800 }}></th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {filteredBooks.map((b, i) => (
+                                  <tr key={`${b.title}-${i}`} style={{ borderTop: `1px solid ${theme.border}`, background: i % 2 ? theme.surface : theme.surface2 }}>
+                                    <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14 }}>
+                                      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                                        <div style={{ width: 40, height: 60, background: theme.surface2, borderRadius: 6, overflow: "hidden", flex: "0 0 auto", border: `1px solid ${theme.border}` }}>
+                                          <CoverImg src={b.cover} alt={b.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                                        </div>
+                                        <div>
+                                          <div style={{ fontWeight: 700 }}>{b.title}</div>
+                                          <div style={{ color: theme.textMuted, fontSize: 13 }}>{b.author}</div>
+                                        </div>
+                                      </div>
+                                    </td>
+                                    <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14 }}>{b.year || "—"}</td>
+                                    <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14 }}>{typeof b.pages === "number" ? b.pages : "—"}</td>
+                                    <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14 }}>{b.publisher || "—"}</td>
+                                    <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14 }}>{b.language || "—"}</td>
+                                    <td style={{ padding: "10px 12px", verticalAlign: "top" }}>
+                                      <StatusSelect book={b} statusMap={statusMap} onChangeStatus={handleChangeStatus} />
+                                    </td>
+                                    <td style={{ padding: "10px 12px", verticalAlign: "top", fontSize: 14 }}>
+                                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                        <a href={`https://www.dba.dk/soeg/?soeg=${vendorSearchQuery(b)}`} target="_blank" rel="noopener noreferrer" aria-label={`Buy "${b.title}" on DBA`} style={{ display: 'inline-block', padding: '0.35rem 0.55rem', borderRadius: 8, border: `1px solid ${theme.border}`, background: theme.surface2, color: theme.text, textDecoration: 'none', fontSize: 12 }}>DBA</a>
+                                        <a href={`https://www.saxo.com/dk/products/search?query=${vendorSearchQuery(b)}`} target="_blank" rel="noopener noreferrer" aria-label={`Buy "${b.title}" on Saxo`} style={{ display: 'inline-block', padding: '0.35rem 0.55rem', borderRadius: 8, border: `1px solid ${theme.border}`, background: theme.surface2, color: theme.text, textDecoration: 'none', fontSize: 12 }}>Saxo</a>
+                                        <a href={`https://bibliotek.kk.dk/search?q=${vendorSearchQueryKKB(b)}`} target="_blank" rel="noopener noreferrer" aria-label={`Borrow "${b.title}" at KKB`} style={{ display: 'inline-block', padding: '0.35rem 0.55rem', borderRadius: 8, border: `1px solid ${theme.border}`, background: theme.surface2, color: theme.text, textDecoration: 'none', fontSize: 12 }}>KKB</a>
+                                      </div>
+                                    </td>
+                                    <td style={{ padding: "10px 12px", verticalAlign: "top" }}>
+                                      <button aria-label={`Remove ${b.title} from library`} onClick={() => deleteBook(b)} style={dangerBtn}>Remove</button>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {/* ── Recent Batch ── */}
+                {activeTab === "recent" && (
+                  <div>
+                    <div style={{ marginBottom: 12, color: theme.textMuted }}>{recentBatch.length} book{recentBatch.length !== 1 ? "s" : ""} in the last batch</div>
+                    {recentBatch.length === 0 ? (
+                      <p style={{ color: theme.textMuted }}>No recent batch. Queue books in the Add tab and commit them.</p>
+                    ) : (
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12 }}>
+                        {recentBatch.map((b, i) => (
+                          <BookCard key={`${b.title}-${i}`} book={b} statusMap={statusMap} onChangeStatus={handleChangeStatus} />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+              </div>
             </div>
-          </div>
+          </ThemeCtx.Provider>
         );
       }
 
