@@ -550,6 +550,175 @@
         );
       }
 
+      /* ------------------------------- Analysis --------------------------------- */
+      // Infer likely gender from first name using a heuristic name list
+      const FEMALE_NAMES = new Set(["mary","patricia","jennifer","linda","barbara","elizabeth","susan","jessica","sarah","karen","lisa","nancy","betty","margaret","sandra","ashley","emily","dorothy","kimberly","donna","carol","michelle","ruth","sharon","laura","virginia","helen","anna","brenda","amber","alice","julia","hanna","hannah","anne","charlotte","jane","kate","lucy","emma","olivia","sophia","isabella","mia","ava","amelia","abigail","ella","scarlett","grace","chloe","camille","simone","diana","maya","nora","zoe","lily","eleanor","toni","joan","edith","iris","virginia","celeste","claire","audrey","colleen","brigid","astrid","sigrid","ingrid","birgit","anne","maria","marie","sofia","elena","nina","vera","rosa","petra","lena","ida","karin","kirsten","inger","grete","helene","bodil","birthe","dorte","lone","mette","pia","helle","lise","tine","rikke","louise","camilla","stine","signe","astrid","frida","saga","maja","svea","liselotte","gunhild","ragnhild","solveig","marit","sissel","toril","berit","unni","vigdis","siri","randi"]);
+      function guessGender(authorStr) {
+        if (!authorStr) return "Unknown";
+        const first = (authorStr.split(/[\s,]+/)[0] || "").toLowerCase();
+        return FEMALE_NAMES.has(first) ? "Female" : "Male";
+      }
+
+      function BarChart({ data, label, colorFn }) {
+        const theme = useTheme();
+        if (!data.length) return <p style={{ color: theme.textMuted, fontSize: 13 }}>Not enough data.</p>;
+        const max = Math.max(...data.map((d) => d.value), 1);
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {data.map((d) => (
+              <div key={d.label} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ width: 110, fontSize: 12, color: theme.textMuted, textAlign: 'right', flexShrink: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={d.label}>{d.label}</div>
+                <div style={{ flex: 1, height: 20, background: theme.surface2, borderRadius: 4, overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: `${(d.value / max) * 100}%`, background: colorFn ? colorFn(d.label) : theme.accent, borderRadius: 4, minWidth: d.value > 0 ? 4 : 0, transition: 'width 0.4s ease' }} />
+                </div>
+                <div style={{ width: 28, fontSize: 12, color: theme.textMuted, flexShrink: 0 }}>{d.value}</div>
+              </div>
+            ))}
+          </div>
+        );
+      }
+
+      function DonutChart({ data }) {
+        const theme = useTheme();
+        if (!data.length || data.every(d => d.value === 0)) return <p style={{ color: theme.textMuted, fontSize: 13 }}>Not enough data.</p>;
+        const total = data.reduce((s, d) => s + d.value, 0);
+        if (total === 0) return <p style={{ color: theme.textMuted, fontSize: 13 }}>Not enough data.</p>;
+        let cumulative = 0;
+        const slices = data.map((d) => {
+          const pct = d.value / total;
+          const start = cumulative;
+          cumulative += pct;
+          return { ...d, pct, start };
+        });
+        const size = 140, cx = 70, cy = 70, r = 50, inner = 28;
+        function arc(pct, start) {
+          if (pct >= 1) pct = 0.9999;
+          const startAngle = start * 2 * Math.PI - Math.PI / 2;
+          const endAngle = (start + pct) * 2 * Math.PI - Math.PI / 2;
+          const x1 = cx + r * Math.cos(startAngle), y1 = cy + r * Math.sin(startAngle);
+          const x2 = cx + r * Math.cos(endAngle), y2 = cy + r * Math.sin(endAngle);
+          const ix1 = cx + inner * Math.cos(startAngle), iy1 = cy + inner * Math.sin(startAngle);
+          const ix2 = cx + inner * Math.cos(endAngle), iy2 = cy + inner * Math.sin(endAngle);
+          const large = pct > 0.5 ? 1 : 0;
+          return `M ${ix1} ${iy1} L ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2} L ${ix2} ${iy2} A ${inner} ${inner} 0 ${large} 0 ${ix1} ${iy1} Z`;
+        }
+        const COLORS = [theme.accent, "#22C55E", "#F59E0B", "#3B82F6", "#F43F5E", "#8B5CF6", "#10B981"];
+        return (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 20, flexWrap: 'wrap' }}>
+            <svg width={size} height={size}>
+              {slices.map((s, i) => (
+                <path key={s.label} d={arc(s.pct, s.start)} fill={COLORS[i % COLORS.length]} />
+              ))}
+            </svg>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {slices.map((s, i) => (
+                <div key={s.label} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+                  <div style={{ width: 10, height: 10, borderRadius: 2, background: COLORS[i % COLORS.length], flexShrink: 0 }} />
+                  <span style={{ color: theme.text }}>{s.label}</span>
+                  <span style={{ color: theme.textMuted }}>({Math.round(s.pct * 100)}%)</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      }
+
+      function StatCard({ title, children }) {
+        const theme = useTheme();
+        return (
+          <div style={{ background: theme.surface, border: `1px solid ${theme.border}`, borderRadius: 14, padding: '1.25rem', boxShadow: theme.shadow }}>
+            <h3 style={{ margin: '0 0 1rem', fontSize: 14, fontWeight: 700, color: theme.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{title}</h3>
+            {children}
+          </div>
+        );
+      }
+
+      function AnalysisTab({ books, statusMap }) {
+        const theme = useTheme();
+        if (books.length === 0) return <p style={{ color: theme.textMuted }}>No books in the library yet.</p>;
+
+        // Publication year distribution (decade buckets)
+        const decadeCounts = {};
+        books.forEach((b) => {
+          const y = parseInt(b.year, 10);
+          if (!isNaN(y)) {
+            const decade = `${Math.floor(y / 10) * 10}s`;
+            decadeCounts[decade] = (decadeCounts[decade] || 0) + 1;
+          }
+        });
+        const yearData = Object.entries(decadeCounts).sort((a, b) => a[0].localeCompare(b[0])).map(([label, value]) => ({ label, value }));
+
+        // Author gender distribution
+        const genderCounts = {};
+        books.forEach((b) => {
+          if (!b.author) return;
+          b.author.split(/[,;&]+/).forEach((a) => {
+            const g = guessGender(a.trim());
+            genderCounts[g] = (genderCounts[g] || 0) + 1;
+          });
+        });
+        const genderData = Object.entries(genderCounts).map(([label, value]) => ({ label, value }));
+        const genderColors = { Male: "#3B82F6", Female: "#F472B6", Unknown: theme.textMuted };
+
+        // Read status distribution
+        const readData = READ_STATUSES.filter(Boolean).map((s) => ({
+          label: s, value: books.filter((b) => statusMap[statusKey(b)] === s).length
+        }));
+
+        // Top authors by book count
+        const authorCounts = {};
+        books.forEach((b) => { if (b.author) authorCounts[b.author] = (authorCounts[b.author] || 0) + 1; });
+        const authorData = Object.entries(authorCounts).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([label, value]) => ({ label, value }));
+
+        // Language distribution
+        const langCounts = {};
+        books.forEach((b) => { const l = (b.language || "Unknown").toUpperCase(); langCounts[l] = (langCounts[l] || 0) + 1; });
+        const langData = Object.entries(langCounts).sort((a, b) => b[1] - a[1]).map(([label, value]) => ({ label, value }));
+
+        // Total pages read
+        const totalPages = books.filter((b) => statusMap[statusKey(b)] === "Read" && typeof b.pages === 'number').reduce((s, b) => s + b.pages, 0);
+        const readCount = books.filter((b) => statusMap[statusKey(b)] === "Read").length;
+        const avgPages = readCount > 0 ? Math.round(books.filter((b) => typeof b.pages === 'number').reduce((s, b) => s + b.pages, 0) / books.filter((b) => typeof b.pages === 'number').length) : 0;
+
+        return (
+          <div style={{ display: 'grid', gap: 16 }}>
+            {/* Summary row */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12 }}>
+              {[
+                { label: 'Total Books', value: books.length },
+                { label: 'Books Read', value: readCount },
+                { label: 'Pages Read', value: totalPages.toLocaleString() },
+                { label: 'Avg. Pages', value: avgPages || '—' },
+              ].map((s) => (
+                <div key={s.label} style={{ background: theme.surface, border: `1px solid ${theme.border}`, borderRadius: 14, padding: '1rem', textAlign: 'center', boxShadow: theme.shadow }}>
+                  <div style={{ fontSize: 28, fontWeight: 800, color: theme.accent, fontFamily: "'Playfair Display', Georgia, serif" }}>{s.value}</div>
+                  <div style={{ fontSize: 12, color: theme.textMuted, marginTop: 4, fontWeight: 600 }}>{s.label}</div>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 16 }}>
+              <StatCard title="Publication Decade">
+                <BarChart data={yearData} colorFn={() => theme.accent} />
+              </StatCard>
+              <StatCard title="Author Gender (estimated)">
+                <p style={{ margin: '0 0 12px', fontSize: 12, color: theme.textMuted }}>Based on first name — approximate only.</p>
+                <DonutChart data={genderData.map((d) => ({ ...d, color: genderColors[d.label] }))} />
+              </StatCard>
+              <StatCard title="Reading Status">
+                <DonutChart data={readData} />
+              </StatCard>
+              <StatCard title="Top Authors">
+                <BarChart data={authorData} colorFn={() => theme.accent} />
+              </StatCard>
+              <StatCard title="Language">
+                <BarChart data={langData} colorFn={() => "#F59E0B"} />
+              </StatCard>
+            </div>
+          </div>
+        );
+      }
+
       /* ------------------------------- AuthModal --------------------------------- */
       function AuthModal({ onClose, onSuccess }) {
         const theme = useTheme();
@@ -638,6 +807,7 @@
         const [loadErr, setLoadErr] = useState("");
         const [supaOk, setSupaOk] = useState(true);
         const [libraryFilter, setLibraryFilter] = useState("");
+        const [statusFilter, setStatusFilter] = useState(""); // "" | "Read" | "Not Read"
         const [allBooksView, setAllBooksView] = useState("table"); // "table" | "cards"
         const [statusMap, setStatusMap] = useState(() => loadStatusMap());
         const lastSearchedRef = useRef("");
@@ -799,15 +969,20 @@
           ? (supaOk ? "Cloud (Supabase)" : "Cloud (Supabase — connection error)")
           : "Local (this browser)";
 
-        const filteredBooks = libraryFilter.trim()
-          ? books.filter((b) => {
-              const f = libraryFilter.toLowerCase();
-              return (b.title || '').toLowerCase().includes(f) ||
-                     (b.author || '').toLowerCase().includes(f) ||
-                     (b.publisher || '').toLowerCase().includes(f) ||
-                     (b.language || '').toLowerCase().includes(f);
-            })
-          : books;
+        const filteredBooks = books.filter((b) => {
+          if (statusFilter) {
+            const bs = statusMap[statusKey(b)] || "";
+            if (bs !== statusFilter) return false;
+          }
+          if (libraryFilter.trim()) {
+            const f = libraryFilter.toLowerCase();
+            return (b.title || '').toLowerCase().includes(f) ||
+                   (b.author || '').toLowerCase().includes(f) ||
+                   (b.publisher || '').toLowerCase().includes(f) ||
+                   (b.language || '').toLowerCase().includes(f);
+          }
+          return true;
+        });
 
         // Derived: per-status counts for the All Books tab header
         const statusCounts = READ_STATUSES.filter(Boolean).reduce((acc, s) => {
@@ -835,6 +1010,7 @@
                     {[
                       ...(user ? [{ id: "add", label: "Add Books" }] : []),
                       { id: "all", label: `Library${books.length ? ` (${books.length})` : ''}` },
+                      { id: "analysis", label: "Analysis" },
                       { id: "recent", label: "Recent" },
                     ].map((t) => (
                       <button key={t.id} onClick={() => setActiveTab(t.id)} aria-selected={activeTab === t.id}
@@ -1005,11 +1181,17 @@
                               onChange={(e) => setLibraryFilter(e.target.value)}
                             />
                           </div>
-                          {books.length > 0 && READ_STATUSES.filter(Boolean).map((s) => (
-                            <span key={s} style={{ padding: '3px 10px', borderRadius: 999, fontSize: 12, fontWeight: 600, background: STATUS_COLORS[s] + '18', color: STATUS_COLORS[s], border: `1px solid ${STATUS_COLORS[s]}33`, whiteSpace: 'nowrap' }}>
-                              {s} · {statusCounts[s]}
-                            </span>
-                          ))}
+                          {books.length > 0 && (
+                            <div style={{ display: 'flex', gap: 4 }}>
+                              <button onClick={() => setStatusFilter("")} style={{ padding: '3px 10px', borderRadius: 999, fontSize: 12, fontWeight: 600, cursor: 'pointer', border: `1px solid ${theme.border}`, background: statusFilter === "" ? theme.accent : theme.surface2, color: statusFilter === "" ? theme.accentText : theme.textMuted }}>All</button>
+                              {READ_STATUSES.filter(Boolean).map((s) => (
+                                <button key={s} onClick={() => setStatusFilter(statusFilter === s ? "" : s)}
+                                  style={{ padding: '3px 10px', borderRadius: 999, fontSize: 12, fontWeight: 600, cursor: 'pointer', border: `1px solid ${statusFilter === s ? STATUS_COLORS[s] : STATUS_COLORS[s] + '44'}`, background: statusFilter === s ? STATUS_COLORS[s] + '25' : STATUS_COLORS[s] + '12', color: STATUS_COLORS[s], whiteSpace: 'nowrap' }}>
+                                  {s} · {statusCounts[s]}
+                                </button>
+                              ))}
+                            </div>
+                          )}
                           <span style={{ color: theme.textMuted, fontSize: 13, whiteSpace: 'nowrap' }}>
                             {libraryFilter.trim() ? `${filteredBooks.length} / ${books.length}` : `${books.length} book${books.length !== 1 ? "s" : ""}`}
                           </span>
@@ -1090,6 +1272,11 @@
                       </>
                     )}
                   </div>
+                )}
+
+                {/* ── Analysis ── */}
+                {activeTab === "analysis" && (
+                  <AnalysisTab books={books} statusMap={statusMap} />
                 )}
 
                 {/* ── Recent Batch ── */}
